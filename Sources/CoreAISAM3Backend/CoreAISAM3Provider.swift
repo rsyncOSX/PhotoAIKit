@@ -14,15 +14,18 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
     public nonisolated let modelIdentity: ModelIdentity
 
     private let modelBundleURL: URL
+    private let runtimeResourcesURL: URL
     private var model: LoadedSAM3Model?
     private nonisolated static let maskThreshold: Float = 0.5
 
     public init(modelBundleURL: URL) throws {
+        let runtimeResourcesURL = try Self.resourcesURLForImageSegmenter(modelBundleURL)
         let resolver = ModelBundleResolver(descriptor: .sam3)
-        guard case let .valid(_, identity) = resolver.status(at: modelBundleURL) else {
-            throw SAM3ProviderError.invalidModelBundle(resolver.status(at: modelBundleURL))
+        guard case let .valid(_, identity) = resolver.status(at: runtimeResourcesURL) else {
+            throw SAM3ProviderError.invalidModelBundle(resolver.status(at: runtimeResourcesURL))
         }
         self.modelBundleURL = modelBundleURL
+        self.runtimeResourcesURL = runtimeResourcesURL
         self.modelIdentity = identity
     }
 
@@ -85,23 +88,16 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
     private func loadModel() async throws -> LoadedSAM3Model {
         if let model { return model }
 
-        let resourcesURL: URL
-        do {
-            resourcesURL = try Self.resourcesURLForImageSegmenter(modelBundleURL)
-        } catch {
-            throw SAM3ProviderError.resourceSetup(Self.message(for: error))
-        }
-
         do {
             let assetName = ModelBundleResolver(descriptor: .sam3)
-                .identity(at: resourcesURL)?.assetName ?? modelIdentity.assetName
+                .identity(at: runtimeResourcesURL)?.assetName ?? modelIdentity.assetName
             let tokenizer = try CLIPTokenizer(
-                folder: resourcesURL.appendingPathComponent("tokenizer", isDirectory: true)
+                folder: runtimeResourcesURL.appendingPathComponent("tokenizer", isDirectory: true)
             )
             let parameters = SegmentationParameters(maskThreshold: Self.maskThreshold, maxSegments: 5)
             let engine = try await CoreAISegmentationEngine(
                 parameters: parameters,
-                modelURL: resourcesURL.appendingPathComponent(assetName)
+                modelURL: runtimeResourcesURL.appendingPathComponent(assetName)
             )
             let loaded = LoadedSAM3Model(engine: engine, tokenizer: tokenizer, parameters: parameters)
             model = loaded

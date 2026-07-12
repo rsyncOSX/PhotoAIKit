@@ -7,22 +7,28 @@ public struct ModelIdentity: Codable, Hashable, Sendable {
     public let sourceModel: String?
     public let assetName: String
     public let metadataVersion: String?
+    private let cacheIdentifierOverride: String?
 
     public init(
         family: String,
         name: String,
         sourceModel: String? = nil,
         assetName: String,
-        metadataVersion: String? = nil
+        metadataVersion: String? = nil,
+        cacheIdentifier: String? = nil
     ) {
         self.family = family
         self.name = name
         self.sourceModel = sourceModel
         self.assetName = assetName
         self.metadataVersion = metadataVersion
+        self.cacheIdentifierOverride = cacheIdentifier
     }
 
     public var cacheIdentifier: String {
+        if let cacheIdentifierOverride {
+            return cacheIdentifierOverride
+        }
         if family.lowercased() == "sam3" {
             return "coreai-sam3-local:\(name):\(assetName)"
         }

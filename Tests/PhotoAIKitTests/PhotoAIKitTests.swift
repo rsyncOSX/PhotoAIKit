@@ -48,6 +48,35 @@ struct PhotoAIKitTests {
         #expect(provider.modelIdentity.name == "test-clip")
     }
 
+    @Test("SAM3 accepts the existing flat tokenizer export layout")
+    func flatSAM3Bundle() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("{}".utf8).write(to: root.appendingPathComponent("tokenizer.json"))
+        try Data().write(to: root.appendingPathComponent("sam3.aimodel"))
+        let metadata = ModelBundleMetadata(
+            name: "test-sam3",
+            family: "sam3",
+            assets: ["main": "sam3.aimodel"]
+        )
+        try JSONEncoder().encode(metadata).write(to: root.appendingPathComponent("metadata.json"))
+
+        let provider = try CoreAISAM3Provider(modelBundleURL: root)
+        #expect(provider.modelIdentity.name == "test-sam3")
+        #expect(provider.modelIdentity.cacheIdentifier == "coreai-sam3-local:test-sam3:sam3.aimodel")
+    }
+
+    @Test("Explicit cache identifiers preserve host storage versions")
+    func explicitCacheIdentifier() {
+        let identity = ModelIdentity(
+            family: "sam3",
+            name: "adapter",
+            assetName: "",
+            cacheIdentifier: "legacy-version"
+        )
+        #expect(identity.cacheIdentifier == "legacy-version")
+    }
+
     @Test("Bounded indexer can recompute a whole batch with fallback")
     func wholeBatchFallback() async throws {
         let fallback = ConstantEmbeddingProvider(name: "fallback", shouldFail: false)

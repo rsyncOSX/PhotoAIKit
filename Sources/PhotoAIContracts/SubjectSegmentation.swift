@@ -4,6 +4,10 @@ import Foundation
 public enum SubjectSegmentationPrompt: String, CaseIterable, Codable, Identifiable, Sendable {
     case subject, person, bird, deer, animal, car, birdHead, animalHead, face
 
+    public static let standardPrompts: [SubjectSegmentationPrompt] = [
+        .subject, .person, .bird, .deer, .animal, .car,
+    ]
+
     public var id: String { rawValue }
 
     public var title: String {
