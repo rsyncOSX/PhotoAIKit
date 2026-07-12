@@ -59,6 +59,15 @@ let source = AIImageSource(
 
 let memory = SubjectMaskMemoryStore()
 let disk = try SubjectMaskDiskStore(cacheDirectory: appMaskCacheURL)
+let maskConfiguration = SubjectMaskRepositoryConfiguration(
+    defaultPrompt: .subject,
+    modelIdentity: sam3.modelIdentity,
+    inputMaxSide: 4_320
+)
+let cachedMasks = SubjectMaskRepository(
+    configuration: maskConfiguration,
+    stores: [memory, disk]
+)
 let service = SegmentationService(
     provider: sam3,
     stores: [memory, disk],

@@ -118,6 +118,59 @@ struct PhotoAIKitTests {
         #expect(await provider.calls == 1)
     }
 
+    @Test("Configured repository reads masks without host globals")
+    func configuredMaskRepository() async throws {
+        let source = AIImageSource(
+            id: UUID(),
+            url: URL(fileURLWithPath: "/tmp/repository-photo.raw"),
+            displayName: "repository-photo.raw"
+        )
+        let model = ModelIdentity(
+            family: "sam3",
+            name: "repository-test",
+            assetName: "sam3.aimodel"
+        )
+        let memory = SubjectMaskMemoryStore()
+        let configuration = SubjectMaskRepositoryConfiguration(
+            defaultPrompt: .bird,
+            modelIdentity: model,
+            inputMaxSide: 128
+        )
+        let repository = SubjectMaskRepository(
+            configuration: configuration,
+            stores: [memory]
+        )
+        let key = await repository.storageKey(for: source)
+        let mask = try #require(makeImage(width: 8, height: 6))
+        let timing = SubjectSegmentationTiming(totalMilliseconds: 1)
+        let diagnostics = SubjectSegmentationDiagnostics(
+            modelIdentity: model,
+            prompt: .bird,
+            confidence: 0.8,
+            timing: timing,
+            inputSize: CGSize(width: 8, height: 6),
+            outputSize: CGSize(width: 8, height: 6)
+        )
+        let result = SubjectSegmentationResult(
+            sourceID: source.id,
+            requestID: UUID(),
+            prompt: .bird,
+            mask: mask,
+            confidence: 0.8,
+            modelIdentity: model,
+            inputSize: CGSize(width: 8, height: 6),
+            outputSize: CGSize(width: 8, height: 6),
+            timing: timing,
+            diagnostics: diagnostics
+        )
+
+        try await memory.save(result, for: key)
+
+        #expect(await repository.contains(source))
+        #expect(await repository.cachedMask(for: source)?.prompt == .bird)
+        #expect(await repository.cachedMask(for: source, prompt: .person) == nil)
+    }
+
     @Test("Disk store round trips PNG masks without model assets")
     func diskStoreRoundTrip() async throws {
         let root = try temporaryDirectory()

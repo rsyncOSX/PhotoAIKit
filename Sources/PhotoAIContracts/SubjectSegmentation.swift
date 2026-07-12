@@ -10,20 +10,6 @@ public enum SubjectSegmentationPrompt: String, CaseIterable, Codable, Identifiab
 
     public var id: String { rawValue }
 
-    public var title: String {
-        switch self {
-        case .subject: "Subject"
-        case .person: "Person"
-        case .bird: "Bird"
-        case .deer: "Deer"
-        case .animal: "Animal"
-        case .car: "Car"
-        case .birdHead: "Bird Head"
-        case .animalHead: "Animal Head"
-        case .face: "Face"
-        }
-    }
-
     public var query: String {
         switch self {
         case .subject: "subject"

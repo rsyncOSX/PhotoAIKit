@@ -28,6 +28,15 @@ public protocol SubjectMaskStoring: Sendable {
     func save(_ result: SubjectSegmentationResult, for key: SubjectMaskStorageKey) async throws
 }
 
+/// Cache-only mask access for host presentation and analysis layers.
+/// Implementations own cache configuration; callers supply only package-owned sources.
+public protocol SubjectMaskProviding: Sendable {
+    func cachedMask(
+        for source: AIImageSource,
+        prompt: SubjectSegmentationPrompt
+    ) async -> SubjectSegmentationResult?
+}
+
 public struct SubjectMaskPrefetchProgress: Equatable, Sendable {
     public let completed: Int
     public let total: Int

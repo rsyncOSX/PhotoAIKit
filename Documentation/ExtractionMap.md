@@ -6,7 +6,7 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 
 | RawCullSAM3 source | Package destination | Result |
 |---|---|---|
-| `SubjectSegmentationTypes.swift` | `PhotoAIContracts/SubjectSegmentation.swift`, `SubjectMaskStorage.swift` | Public, typed, `Sendable` request/result/diagnostic/progress contracts and provider/store protocols. |
+| `SubjectSegmentationTypes.swift` | `PhotoAIContracts/SubjectSegmentation.swift`, `SubjectMaskStorage.swift` | Public, UI-neutral, typed, `Sendable` request/result/diagnostic/progress contracts and provider/store protocols. Prompt display labels stay in RawCull. |
 | `CoreAISAM3Provider.swift` | `CoreAISAM3Backend/CoreAISAM3Provider.swift` | Full tokenizer, lazy load, inference, query selection, sigmoid conversion, bilinear resize, threshold, feather, diagnostics, and flat-bundle shim. Model bundle URL is required. |
 | `SAM3ModelIdentity.swift` | `ModelIdentity.swift`, `ModelBundleResolver.swift` | Generic identity plus SAM3-compatible cache identifier. No static installed-model lookup. |
 | `SAM3ModelResourceManager.swift` | `ModelBundleResolver.swift` and `.sam3` descriptor | Validation is reusable and URL-driven. RawCull paths, bundle fallback, and display strings are removed. |
@@ -17,11 +17,11 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 | `SAM3MaskBuildTypes.swift` | `SegmentationBatchPipeline.swift` | Transport-neutral summary and event values extracted. RawCull helper request fields are host-only. |
 | `SAM3MaskInventoryEntry.swift` | `SubjectMaskGeometry.swift` | Alpha extraction, coverage, normalized bounds, centroid, and freshness. |
 | `SubjectQualityBadgeModel.swift` | `SubjectMaskQuality.swift` | Geometry thresholds, clipped-edge detection, and quality classification. RawCull badge labels/help text remain host presentation. |
-| `SAM3SubjectMaskCacheReader.swift` | Replaced by injected `SubjectMaskStoring` / `SegmentationService` | Removes static prompt/model/size/global-cache state. |
+| `SAM3SubjectMaskCacheReader.swift` | `PhotoAIWorkflows/SubjectMaskRepository.swift` | Injected cache facade with explicit prompt/model/size configuration. RawCull's static reader is removed. |
 | `SAM3MaskCatalogIndex.swift` | Host adapter over `SubjectMaskStoring` + `SubjectMaskGeometry` | The reusable read/geometry operations are extracted; progressive catalog publication remains tied to the host catalog model. |
 | `SAM3MaskHelperController.swift` | Not packaged | AppKit process launch, executable lookup, security scope, parent PID, app path, and restart are RawCull-specific per `isolateai.md`. |
 | `SAM3MaskHelperProgressView.swift`, segmentation controls/settings/views | Not packaged | SwiftUI and app display state stay in RawCull. |
-| SAM3 consumers in sharpness, burst review, comparison, thumbnails, and zoom | Not packaged | These are app adapters/policy. They can later consume the package facade without moving product behavior into the library. |
+| SAM3 consumers in sharpness, burst review, comparison, thumbnails, and zoom | Not packaged | These remain app adapters/policy and now receive a narrow mask facade from RawCull's `RawCullAIContainer`. |
 
 ## CLIP
 
@@ -34,7 +34,7 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 | Bounded indexing loop and progress | `EmbeddingIndexer.swift` | Package-owned sources, injected decoder/provider, configurable concurrency, per-item or whole-batch fallback, typed failures/results. |
 | RawParserKit and ImageIO thumbnail decoding | Host `ImageDecoding` adapter | RAW format behavior remains owned by the integrating app. |
 | Vision feature-print generation/archive/distance | Host fallback provider/codec | Vision is a product-selected alternative backend, not CLIP inference. The package's fallback policy accepts any provider. |
-| `SimilarityScoringModel` observable state, settings, estimation/status strings | Not packaged | UI/presentation state stays in RawCull. |
+| `SimilarityScoringModel` observable state, settings, estimation/status strings | Not packaged | UI/presentation state stays in RawCull. Settings/model URL selection now occurs in the RawCull integration layer, and burst grouping work is delegated to a separate RawCull policy model. |
 | Burst adjacency cache/grouping, saliency mismatch, review/rating decisions | Not packaged | Culling policy consumes embeddings but is not CLIP functionality. |
 
 ## Non-runtime sources and assets
@@ -45,4 +45,4 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 
 ## Boundary checks
 
-The package source contains no imports or references to `RawCullCore`, `RawParserKit`, `FileItem`, `SharedMemoryCache`, `SettingsViewModel`, SwiftUI, Observation, AppKit, or `Bundle.main`. Public API tests import the modules normally (never with `@testable`) and use fake host source/decoder/provider implementations.
+The package source contains no imports or references to `RawCullCore`, `RawParserKit`, `FileItem`, `SharedMemoryCache`, `SettingsViewModel`, SwiftUI, Observation, AppKit, or `Bundle.main`. Public API tests import the modules normally (never with `@testable`) and use fake host source/decoder/provider implementations. RawCull constructs package providers, stores, workflows, helper paths, and host adapters once in `RawCullAIContainer`.
