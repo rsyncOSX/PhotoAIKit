@@ -5,14 +5,37 @@ import Foundation
 import PhotoAIContracts
 
 /// Actor-owned Core AI CLIP runtime. The host supplies the model bundle URL.
-public actor CoreAICLIPProvider: ImageEmbeddingProviding {
+public actor CoreAICLIPProvider:
+    ImageEmbeddingProviding,
+    ImageSimilarityArtifactProviding,
+    ImageSimilarityArtifactComparing
+{
     public nonisolated let modelIdentity: ModelIdentity
+
+    public nonisolated static let resourceDescriptor = ModelResourceDescriptor.clip
+
+    public nonisolated static var factory: ModelProviderFactory<CoreAICLIPProvider> {
+        ModelProviderFactory(descriptor: resourceDescriptor) { url in
+            try CoreAICLIPProvider(modelBundleURL: url)
+        }
+    }
+
+    public nonisolated var backendDescriptor: SimilarityBackendDescriptor {
+        SimilarityBackendDescriptor(
+            backend: "clip",
+            modelFingerprint: modelIdentity.artifactIdentifier,
+            representation: "normalized-float-vector-json-v1",
+            preprocessingVersion: Self.resourceDescriptor.preprocessingVersion,
+            normalizationVersion: "l2-v1",
+            configurationVersion: Self.resourceDescriptor.configurationVersion
+        )
+    }
 
     private let modelBundleURL: URL
     private var loadedModel: LoadedCLIPModel?
 
     public init(modelBundleURL: URL) throws {
-        let resolver = ModelBundleResolver(descriptor: .clip)
+        let resolver = ModelBundleResolver(descriptor: Self.resourceDescriptor.bundleDescriptor)
         guard case let .valid(_, identity) = resolver.status(at: modelBundleURL) else {
             throw CLIPProviderError.invalidModelBundle(resolver.status(at: modelBundleURL))
         }
@@ -28,6 +51,53 @@ public actor CoreAICLIPProvider: ImageEmbeddingProviding {
             modelIdentity: modelIdentity,
             values: values
         )
+    }
+
+    public func artifact(
+        for image: CGImage,
+        source: AIImageSource
+    ) async throws -> SimilarityArtifact {
+        let embedding = try await embedding(for: image)
+        return SimilarityArtifact(
+            descriptor: SimilarityArtifactDescriptor(
+                backend: backendDescriptor,
+                dimensions: embedding.values.count,
+                sourceFingerprint: SourceFingerprint(source: source)
+            ),
+            payload: try JSONEncoder().encode(embedding)
+        )
+    }
+
+    public nonisolated func distance(
+        from left: SimilarityArtifact,
+        to right: SimilarityArtifact
+    ) throws -> Float? {
+        guard left.descriptor.isCompatibleForDistance(with: right.descriptor),
+              left.descriptor.backend == backendDescriptor.backend,
+              left.descriptor.modelFingerprint == backendDescriptor.modelFingerprint
+        else { return nil }
+        do {
+            let decoder = JSONDecoder()
+            let leftEmbedding = try decoder.decode(ImageEmbedding.self, from: left.payload)
+            let rightEmbedding = try decoder.decode(ImageEmbedding.self, from: right.payload)
+            guard EmbeddingArtifact(
+                descriptor: left.descriptor,
+                embedding: leftEmbedding
+            ).isInternallyConsistent,
+            EmbeddingArtifact(
+                descriptor: right.descriptor,
+                embedding: rightEmbedding
+            ).isInternallyConsistent else {
+                throw CLIPSimilarityArtifactError.invalidPayload(
+                    "The vector payload does not match its artifact descriptor."
+                )
+            }
+            return leftEmbedding.cosineDistance(to: rightEmbedding)
+        } catch let error as CLIPSimilarityArtifactError {
+            throw error
+        } catch {
+            throw CLIPSimilarityArtifactError.invalidPayload(String(describing: error))
+        }
     }
 
     private func imageEmbedding(for image: CGImage, model: LoadedCLIPModel) async throws -> [Float] {
@@ -301,10 +371,16 @@ public enum CLIPProviderError: Error, CustomStringConvertible, Sendable {
     }
 }
 
+public enum CLIPSimilarityArtifactError: Error, Equatable, Sendable {
+    case invalidPayload(String)
+}
+
 public extension ModelBundleDescriptor {
     static let clip = ModelBundleDescriptor(
-        family: "clip",
-        fallbackName: "CLIP",
-        requiredRelativePaths: ["tokenizer/tokenizer.json"]
+        family: ModelResourceDescriptor.clip.bundleDescriptor.family,
+        fallbackName: ModelResourceDescriptor.clip.bundleDescriptor.fallbackName,
+        assetKey: ModelResourceDescriptor.clip.bundleDescriptor.assetKey,
+        requiredRelativePaths: ModelResourceDescriptor.clip.bundleDescriptor.requiredRelativePaths,
+        acceptedAssetExtensions: ModelResourceDescriptor.clip.bundleDescriptor.acceptedAssetExtensions
     )
 }

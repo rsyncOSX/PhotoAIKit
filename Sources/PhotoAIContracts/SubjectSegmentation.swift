@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-public enum SubjectSegmentationPrompt: String, CaseIterable, Codable, Identifiable, Sendable {
+public enum SubjectSegmentationPrompt: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
     case subject, person, bird, deer, animal, car, birdHead, animalHead, face
 
     public static let standardPrompts: [SubjectSegmentationPrompt] = [

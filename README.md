@@ -12,11 +12,12 @@ The package pins the same `apple/coreai-models` revision used by the source appl
 
 ## Products
 
-- `PhotoAIContracts`: model identities, source values, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
+- `PhotoAIContracts`: model identities and verified fingerprints, capability/factory contracts, source values, typed similarity artifacts, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
 - `CoreAICLIPBackend`: actor-owned CLIP preprocessing and Core AI inference.
 - `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, and mask decoding.
-- `PhotoAIWorkflows`: bounded embedding indexing, configurable fallback, cosine similarity, segmentation preprocessing/batching, mask geometry, and quality classification.
-- `PhotoAIStorage`: injected memory/disk mask stores and current/legacy embedding codecs.
+- `VisionFeaturePrintBackend`: actor-owned Vision feature-print generation, opaque artifact coding, and native distance calculation.
+- `PhotoAIWorkflows`: bounded vector/opaque artifact indexing, configurable fallback, cosine similarity, segmentation preprocessing/batching, versioned batch transport, mask cataloging, prompt fallback, best-mask selection, geometry, and quality classification.
+- `PhotoAIStorage`: injected memory/disk mask stores, current descriptor-complete artifact codecs, and legacy embedding readers.
 
 ## Model URLs
 
@@ -30,6 +31,15 @@ let clip = try CoreAICLIPProvider(modelBundleURL: clipBundleURL)
 let sam3 = try CoreAISAM3Provider(modelBundleURL: sam3BundleURL)
 ```
 
+Hosts with ordered candidate URLs can use the shared capability and factory API:
+
+```swift
+let capability = CoreAICLIPProvider.factory.capability(in: candidateURLs)
+let clip = try CoreAICLIPProvider.factory.makeFirstAvailable(in: candidateURLs)
+```
+
+`ModelCapabilityStatus` contains no display wording or application path policy.
+
 A bundle URL is expected to contain:
 
 ```text
@@ -39,6 +49,12 @@ ModelBundle/
 │   └── tokenizer.json
 └── selected-model.aimodel     # or .aimodelc
 ```
+
+New exports also include `asset_fingerprints.main`. `ModelBundleResolver`
+cryptographically verifies this value. Older bundles remain valid and receive a
+size/modification-time fallback fingerprint; `ModelIdentity.cacheIdentifier`
+keeps its existing behavior while `artifactIdentifier` is the fingerprinted key
+for new artifacts.
 
 No default Application Support path, `Bundle.main` lookup, or package resource fallback is used.
 
@@ -95,17 +111,61 @@ let indexer = EmbeddingIndexer(
 let index = try await indexer.index(sources)
 ```
 
-`LegacyCLIPEmbeddingCodec` reads and writes the version-1 JSON envelope currently used by RawCull, which allows later integration without an immediate embedding-data migration.
+For a package-owned CLIP-to-Vision fallback, use descriptor-complete artifacts:
+
+```swift
+import VisionFeaturePrintBackend
+
+let vision = VisionFeaturePrintBackend()
+let indexer = SimilarityArtifactIndexer(
+    primaryProvider: clip,
+    fallbackProvider: vision,
+    decoder: rawAwareDecoder,
+    fallbackPolicy: .wholeBatch,
+    concurrencyLimit: 2
+)
+let artifacts = try await indexer.index(sources)
+```
+
+`SimilarityArtifactDescriptor` records backend, model fingerprint, dimensions,
+representation, preprocessing, normalization, configuration, source fingerprint,
+and schema version. Vision observations stay opaque; comparison goes through
+`VisionFeaturePrintBackend.distance(from:to:)`.
+
+`EmbeddingCodec.encode(EmbeddingArtifact)` is the current CLIP persistence API.
+The former identity-incomplete writers remain callable but are deprecated.
+`decodeMigrating` accepts both version-1 formats against the real current model
+identity and marks the result for immediate rewrite.
+
+For SAM workflows, `SubjectMaskCatalogIndex` builds incremental package-owned
+inventory, while `SubjectMaskSelector` implements ordered prompts, minimum
+quality/confidence, best-mask selection, and cache-only or generate-if-missing
+acquisition. `SegmentationBuildTransportCodec` provides a versioned JSON-lines
+event schema for helper processes.
+
+## Model export tools
+
+Package-neutral developer tools live under `Tools`. Output locations are always
+explicit and no script defaults to an application resource directory:
+
+```sh
+uv run Tools/export_clip.py --output-dir /path/to/models
+uv run Tools/export_sam3.py --output-dir /path/to/models
+python3 Tools/select_sam3_asset.py sam3_float16.aimodel \
+  --bundle-dir /path/to/models/SAM3
+```
+
+Export and selection write the fingerprint manifest consumed by
+`ModelBundleResolver`.
 
 ## Deliberate host responsibilities
 
 - model download/install UI and model URL selection;
 - security-scoped bookmarks and sandbox access;
 - RAW decoding (for example RawParserKit) and ImageIO fallback;
-- Vision feature-print implementation, if retained;
 - SwiftUI/Observation state and display text;
 - “latest selection wins” behavior;
 - burst grouping, saliency penalties, sharpness/rating decisions;
-- SAM3 helper-process launch, cancellation, parent-process coordination, and app restart.
+- SAM3 helper-process launch, parent-process coordination, and app restart.
 
 See [Documentation/ExtractionMap.md](Documentation/ExtractionMap.md) for the complete source-to-package audit.

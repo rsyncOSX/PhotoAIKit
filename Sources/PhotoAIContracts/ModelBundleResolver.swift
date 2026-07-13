@@ -69,13 +69,32 @@ public struct ModelBundleResolver: Sendable {
            !descriptor.acceptedAssetExtensions.contains(URL(fileURLWithPath: assetName).pathExtension) {
             return .invalid(url: url, reason: "The selected asset has an unsupported extension: \(assetName).")
         }
-        guard fileManager.fileExists(atPath: url.appendingPathComponent(assetName).path) else {
+        let assetURL = url.appendingPathComponent(assetName)
+        guard fileManager.fileExists(atPath: assetURL.path) else {
             return .invalid(url: url, reason: "The selected model asset is missing: \(assetName).")
         }
         for relativePath in descriptor.requiredRelativePaths {
             guard fileManager.fileExists(atPath: url.appendingPathComponent(relativePath).path) else {
                 return .invalid(url: url, reason: "A required model resource is missing: \(relativePath).")
             }
+        }
+
+        let assetFingerprint: ModelAssetFingerprint
+        do {
+            assetFingerprint = try ModelAssetFingerprinter.fingerprint(
+                at: assetURL,
+                manifest: metadata.assetFingerprints?[descriptor.assetKey]
+            )
+        } catch let ModelAssetFingerprintError.checksumMismatch(expected, actual) {
+            return .invalid(
+                url: url,
+                reason: "The selected model asset checksum does not match metadata.json (expected \(expected), got \(actual))."
+            )
+        } catch {
+            return .invalid(
+                url: url,
+                reason: "The selected model asset could not be fingerprinted: \(error)."
+            )
         }
 
         return .valid(
@@ -85,7 +104,8 @@ public struct ModelBundleResolver: Sendable {
                 name: metadata.name ?? descriptor.fallbackName,
                 sourceModel: metadata.sourceModel,
                 assetName: assetName,
-                metadataVersion: metadata.metadataVersion
+                metadataVersion: metadata.metadataVersion,
+                assetFingerprint: assetFingerprint
             )
         )
     }

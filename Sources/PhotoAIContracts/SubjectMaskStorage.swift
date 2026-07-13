@@ -28,6 +28,20 @@ public protocol SubjectMaskStoring: Sendable {
     func save(_ result: SubjectSegmentationResult, for key: SubjectMaskStorageKey) async throws
 }
 
+public struct SubjectMaskCacheMetadata: Equatable, Sendable {
+    public let modificationDate: Date?
+
+    public init(modificationDate: Date?) {
+        self.modificationDate = modificationDate
+    }
+}
+
+/// Optional cache-inspection capability used by catalog workflows. Stores that
+/// do not persist metadata do not need to conform.
+public protocol SubjectMaskCacheMetadataProviding: Sendable {
+    func cacheMetadata(for key: SubjectMaskStorageKey) async -> SubjectMaskCacheMetadata?
+}
+
 /// Cache-only mask access for host presentation and analysis layers.
 /// Implementations own cache configuration; callers supply only package-owned sources.
 public protocol SubjectMaskProviding: Sendable {

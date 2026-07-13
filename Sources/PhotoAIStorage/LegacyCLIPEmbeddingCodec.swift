@@ -3,6 +3,7 @@ import PhotoAIContracts
 
 /// Reads and writes the source application's version-1 CLIP envelope for a staged migration.
 public enum LegacyCLIPEmbeddingCodec {
+    @available(*, deprecated, message: "Legacy envelopes discard model and source identity. Use EmbeddingCodec.encode(EmbeddingArtifact) for new data.")
     public static func encode(_ embedding: ImageEmbedding) throws -> Data {
         try JSONEncoder().encode(Envelope(
             version: 1,

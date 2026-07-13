@@ -13,6 +13,14 @@ extension CoreAISegmentationEngine: @retroactive @unchecked Sendable {}
 public actor CoreAISAM3Provider: SubjectSegmenting {
     public nonisolated let modelIdentity: ModelIdentity
 
+    public nonisolated static let resourceDescriptor = ModelResourceDescriptor.sam3
+
+    public nonisolated static var factory: ModelProviderFactory<CoreAISAM3Provider> {
+        ModelProviderFactory(descriptor: resourceDescriptor) { url in
+            try CoreAISAM3Provider(modelBundleURL: url)
+        }
+    }
+
     private let modelBundleURL: URL
     private let runtimeResourcesURL: URL
     private var model: LoadedSAM3Model?
@@ -20,7 +28,7 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
 
     public init(modelBundleURL: URL) throws {
         let runtimeResourcesURL = try Self.resourcesURLForImageSegmenter(modelBundleURL)
-        let resolver = ModelBundleResolver(descriptor: .sam3)
+        let resolver = ModelBundleResolver(descriptor: Self.resourceDescriptor.bundleDescriptor)
         guard case let .valid(_, identity) = resolver.status(at: runtimeResourcesURL) else {
             throw SAM3ProviderError.invalidModelBundle(resolver.status(at: runtimeResourcesURL))
         }
@@ -89,7 +97,7 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         if let model { return model }
 
         do {
-            let assetName = ModelBundleResolver(descriptor: .sam3)
+            let assetName = ModelBundleResolver(descriptor: Self.resourceDescriptor.bundleDescriptor)
                 .identity(at: runtimeResourcesURL)?.assetName ?? modelIdentity.assetName
             let tokenizer = try CLIPTokenizer(
                 folder: runtimeResourcesURL.appendingPathComponent("tokenizer", isDirectory: true)
@@ -322,8 +330,10 @@ public enum SAM3ProviderError: Error, CustomStringConvertible, Sendable {
 
 public extension ModelBundleDescriptor {
     static let sam3 = ModelBundleDescriptor(
-        family: "sam3",
-        fallbackName: "SAM3",
-        requiredRelativePaths: ["tokenizer/tokenizer.json"]
+        family: ModelResourceDescriptor.sam3.bundleDescriptor.family,
+        fallbackName: ModelResourceDescriptor.sam3.bundleDescriptor.fallbackName,
+        assetKey: ModelResourceDescriptor.sam3.bundleDescriptor.assetKey,
+        requiredRelativePaths: ModelResourceDescriptor.sam3.bundleDescriptor.requiredRelativePaths,
+        acceptedAssetExtensions: ModelResourceDescriptor.sam3.bundleDescriptor.acceptedAssetExtensions
     )
 }

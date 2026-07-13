@@ -18,8 +18,23 @@ struct PhotoAIKitTests {
 
         #expect(abs((left.cosineDistance(to: same) ?? -1)) < 0.0001)
         #expect(abs((left.cosineDistance(to: orthogonal) ?? -1) - 1) < 0.0001)
-        let encoded = try EmbeddingCodec.encode(left)
-        #expect(try EmbeddingCodec.decode(encoded) == left)
+        let descriptor = EmbeddingArtifactDescriptor(
+            backend: "clip",
+            modelFingerprint: identity.artifactIdentifier,
+            dimensions: left.values.count,
+            representation: "normalized-float-vector-json-v1",
+            preprocessingVersion: "test-v1",
+            normalizationVersion: "l2-v1",
+            configurationVersion: "test-v1",
+            sourceFingerprint: SourceFingerprint(
+                standardizedPath: "/tmp/test.raw",
+                fileSize: 1,
+                modificationDate: nil
+            )
+        )
+        let artifact = EmbeddingArtifact(descriptor: descriptor, embedding: left)
+        let encoded = try EmbeddingCodec.encode(artifact)
+        #expect(try EmbeddingCodec.decodeArtifact(encoded) == artifact)
     }
 
     @Test("Model bundles are accepted only through supplied URLs")
@@ -164,7 +179,7 @@ struct PhotoAIKitTests {
             diagnostics: diagnostics
         )
 
-        try await memory.save(result, for: key)
+        await memory.save(result, for: key)
 
         #expect(await repository.contains(source))
         #expect(await repository.cachedMask(for: source)?.prompt == .bird)

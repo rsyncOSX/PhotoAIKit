@@ -3,6 +3,14 @@ import Foundation
 
 public enum SubjectMaskQualityLevel: Equatable, Sendable {
     case good, warning, poor
+
+    public var rank: Int {
+        switch self {
+        case .poor: 0
+        case .warning: 1
+        case .good: 2
+        }
+    }
 }
 
 public struct SubjectMaskQuality: Equatable, Sendable {

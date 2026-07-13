@@ -85,6 +85,52 @@ public struct SegmentationBuildEvent: Codable, Equatable, Sendable {
     }
 }
 
+/// Stable transport wrapper for helper processes or other JSON-lines clients.
+/// Host-only request fields (bookmarks, process IDs, app paths) wrap this value
+/// outside PhotoAIKit.
+public struct SegmentationBuildTransportEnvelope: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let event: SegmentationBuildEvent
+
+    public init(
+        schemaVersion: Int = Self.currentSchemaVersion,
+        event: SegmentationBuildEvent
+    ) {
+        self.schemaVersion = schemaVersion
+        self.event = event
+    }
+}
+
+public enum SegmentationBuildTransportCodec {
+    public static func encodeLine(_ event: SegmentationBuildEvent) throws -> Data {
+        var data = try JSONEncoder().encode(SegmentationBuildTransportEnvelope(
+            event: event
+        ))
+        data.append(0x0A)
+        return data
+    }
+
+    public static func decodeLine(_ data: Data) throws -> SegmentationBuildEvent {
+        let trimmed = Data(data.prefix { $0 != 0x0A && $0 != 0x0D })
+        let envelope = try JSONDecoder().decode(
+            SegmentationBuildTransportEnvelope.self,
+            from: trimmed
+        )
+        guard envelope.schemaVersion == SegmentationBuildTransportEnvelope.currentSchemaVersion else {
+            throw SegmentationBuildTransportError.unsupportedSchemaVersion(
+                envelope.schemaVersion
+            )
+        }
+        return envelope.event
+    }
+}
+
+public enum SegmentationBuildTransportError: Error, Equatable, Sendable {
+    case unsupportedSchemaVersion(Int)
+}
+
 public struct SegmentationBatchPipeline: Sendable {
     public let service: SegmentationService
     public let prompt: SubjectSegmentationPrompt
