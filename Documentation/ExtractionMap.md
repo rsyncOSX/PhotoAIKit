@@ -28,7 +28,8 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 
 | RawCullSAM3 source | Package destination | Result |
 |---|---|---|
-| `CoreAICLIPProvider.swift` | `CoreAICLIPBackend/CoreAICLIPProvider.swift` | Full lazy Core AI load, descriptor validation, dummy token/mask creation, image resize and CLIP normalization, NDArray fill/flatten, run, and normalized typed output. Model bundle URL is required. |
+| `CoreAICLIPProvider.swift` | `CoreAICLIPBackend/CoreAICLIPProvider.swift` | Full lazy Core AI load, descriptor validation, image resize/normalization, text tokenization/padding/attention masks, joint image/text inference, typed output validation, cancellation, and compatible image/text cosine similarity. Model bundle URL is required. |
+| CLIP semantic-query contracts | `PhotoAIContracts/TextEmbedding.swift` | Query-scoped descriptor-complete text vectors plus text-provider and image/text-comparator protocols. Vision and every incompatible CLIP descriptor field are rejected before payload decoding. |
 | `CLIPModelResourceManager.swift` | `ModelBundleResolver.swift`, `ModelAssetFingerprint.swift`, `ModelResource.swift`, and `.clip` descriptor | URL validation, fingerprinted identity, capability state, and factory mechanics are reusable. RawCull paths, bundle fallback policy, and display text are removed. |
 | `SimilarityEmbeddingEnvelope` normalization/cosine helpers | `ImageEmbedding.swift`, `SimilarityMetric.swift` | Typed normalized vectors and backend/model-compatible cosine distance. |
 | Version-1 CLIP JSON persistence | `LegacyCLIPEmbeddingCodec.swift`, `EmbeddingCodec.swift` | Legacy readers remain for staged integration; identity-incomplete writers are deprecated. Current artifacts require backend/model/source/preprocessing/normalization/configuration/schema identity and migration reports when rewrite is required. |
@@ -47,4 +48,4 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 
 ## Boundary checks
 
-The package source contains no imports or references to `RawCullCore`, `RawParserKit`, `FileItem`, `SharedMemoryCache`, `SettingsViewModel`, SwiftUI, Observation, AppKit, or `Bundle.main`. Public API tests import the modules normally (never with `@testable`) and use fake host source/decoder/provider implementations. RawCull constructs package providers, stores, workflows, helper paths, and host adapters once in `RawCullAIContainer`.
+The package source contains no imports or references to `RawCullCore`, `RawParserKit`, `FileItem`, `SharedMemoryCache`, `SettingsViewModel`, SwiftUI, Observation, AppKit, or `Bundle.main`. Public contract tests import the modules normally and use fake host source/decoder/provider implementations; focused backend tests use `@testable` only for token-batch and output-shape validation. RawCull constructs package providers, stores, workflows, helper paths, and host adapters once in `RawCullAIContainer`.

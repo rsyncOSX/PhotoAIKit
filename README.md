@@ -12,8 +12,8 @@ The package pins the same `apple/coreai-models` revision used by the source appl
 
 ## Products
 
-- `PhotoAIContracts`: model identities and verified fingerprints, capability/factory contracts, source values, typed similarity artifacts, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
-- `CoreAICLIPBackend`: actor-owned CLIP preprocessing and Core AI inference.
+- `PhotoAIContracts`: model identities and verified fingerprints, capability/factory contracts, source values, typed image and text similarity values, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
+- `CoreAICLIPBackend`: actor-owned CLIP image preprocessing, text tokenization, Core AI inference, and image/text comparison.
 - `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, and mask decoding.
 - `VisionFeaturePrintBackend`: actor-owned Vision feature-print generation, opaque artifact coding, and native distance calculation.
 - `PhotoAIWorkflows`: bounded vector/opaque artifact indexing, configurable fallback, cosine similarity, segmentation preprocessing/batching, versioned batch transport, mask cataloging, prompt fallback, best-mask selection, geometry, and quality classification.
@@ -136,6 +136,25 @@ and schema version. Vision observations stay opaque; comparison goes through
 The former identity-incomplete writers remain callable but are deprecated.
 `decodeMigrating` accepts both version-1 formats against the real current model
 identity and marks the result for immediate rewrite.
+
+For semantic queries, encode text with the same provider that produced the
+image artifacts, then compare through the backend-owned primitive:
+
+```swift
+let query = try await clip.embedding(for: "a bird in flight")
+let score = try clip.similarity(image: persistedArtifact, text: query)
+```
+
+`TextEmbedding` is query-scoped and is not a file-backed
+`SimilarityArtifact`. Its descriptor carries the complete backend identity,
+dimensions, tokenizer version, and schema. The comparator rejects Vision
+artifacts and every mismatched CLIP model/configuration field before decoding
+the opaque image payload. Its result is cosine similarity in `-1 ... 1`, where
+higher values are closer semantic matches.
+
+The exported CLIP graph owns L2 normalization of `text_embeds`.
+`CoreAICLIPProvider` validates that output as finite, non-empty, correctly
+shaped, and normalized; it does not normalize the text vector again.
 
 For SAM workflows, `SubjectMaskCatalogIndex` builds incremental package-owned
 inventory, while `SubjectMaskSelector` implements ordered prompts, minimum

@@ -8,11 +8,14 @@ import PhotoAIContracts
 public actor CoreAICLIPProvider:
     ImageEmbeddingProviding,
     ImageSimilarityArtifactProviding,
-    ImageSimilarityArtifactComparing
+    ImageSimilarityArtifactComparing,
+    TextEmbeddingProviding,
+    ImageTextSimilarityComparing
 {
     public nonisolated let modelIdentity: ModelIdentity
 
     public nonisolated static let resourceDescriptor = ModelResourceDescriptor.clip
+    public nonisolated static let tokenizerVersion = "clip-bpe-tokenizer-v1"
 
     public nonisolated static var factory: ModelProviderFactory<CoreAICLIPProvider> {
         ModelProviderFactory(descriptor: resourceDescriptor) { url in
@@ -51,6 +54,38 @@ public actor CoreAICLIPProvider:
             modelIdentity: modelIdentity,
             values: values
         )
+    }
+
+    public func embedding(for text: String) async throws -> TextEmbedding {
+        try Task.checkCancellation()
+        let model = try await loadModel()
+        try Task.checkCancellation()
+
+        let sequenceLength = model.inputIDsDescriptor.shape[1]
+        let queryTokens = model.tokenizer.encode(text, contextLength: sequenceLength)
+        let batch = try Self.makeTextBatch(
+            queryTokens: queryTokens,
+            fillerTokens: model.dummyTokens[0],
+            batchSize: model.inputIDsDescriptor.shape[0],
+            sequenceLength: sequenceLength
+        )
+
+        try Task.checkCancellation()
+        let values = try await textEmbedding(for: batch, model: model)
+        try Task.checkCancellation()
+
+        do {
+            return try TextEmbedding(
+                descriptor: TextEmbeddingDescriptor(
+                    backend: backendDescriptor,
+                    dimensions: values.count,
+                    tokenizerVersion: Self.tokenizerVersion
+                ),
+                values: values
+            )
+        } catch let error as TextEmbeddingValidationError {
+            throw CLIPTextInferenceError.invalidEmbedding(error)
+        }
     }
 
     public func artifact(
@@ -100,10 +135,120 @@ public actor CoreAICLIPProvider:
         }
     }
 
+    public nonisolated func similarity(
+        image: SimilarityArtifact,
+        text: TextEmbedding
+    ) throws -> Float {
+        let validatedText: TextEmbedding
+        do {
+            validatedText = try text.validated()
+        } catch let error as TextEmbeddingValidationError {
+            throw ImageTextSimilarityError.invalidTextEmbedding(error)
+        }
+
+        let imageDescriptor = image.descriptor
+        let textDescriptor = validatedText.descriptor
+        guard imageDescriptor.backend == backendDescriptor.backend else {
+            throw ImageTextSimilarityError.unsupportedImageBackend(
+                expected: backendDescriptor.backend,
+                actual: imageDescriptor.backend
+            )
+        }
+        guard textDescriptor.backend.backend == backendDescriptor.backend else {
+            throw ImageTextSimilarityError.unsupportedTextBackend(
+                expected: backendDescriptor.backend,
+                actual: textDescriptor.backend.backend
+            )
+        }
+        guard imageDescriptor.modelFingerprint == backendDescriptor.modelFingerprint,
+              textDescriptor.backend.modelFingerprint == backendDescriptor.modelFingerprint
+        else {
+            throw ImageTextSimilarityError.incompatibleModelFingerprint
+        }
+        guard imageDescriptor.dimensions == textDescriptor.dimensions else {
+            throw ImageTextSimilarityError.incompatibleDimensions(
+                expected: textDescriptor.dimensions,
+                actual: imageDescriptor.dimensions
+            )
+        }
+        guard imageDescriptor.representation == backendDescriptor.representation,
+              textDescriptor.backend.representation == backendDescriptor.representation
+        else {
+            throw ImageTextSimilarityError.incompatibleRepresentation
+        }
+        guard imageDescriptor.preprocessingVersion == backendDescriptor.preprocessingVersion,
+              textDescriptor.backend.preprocessingVersion == backendDescriptor.preprocessingVersion
+        else {
+            throw ImageTextSimilarityError.incompatiblePreprocessing
+        }
+        guard imageDescriptor.normalizationVersion == backendDescriptor.normalizationVersion,
+              textDescriptor.backend.normalizationVersion == backendDescriptor.normalizationVersion
+        else {
+            throw ImageTextSimilarityError.incompatibleNormalization
+        }
+        guard imageDescriptor.configurationVersion == backendDescriptor.configurationVersion,
+              textDescriptor.backend.configurationVersion == backendDescriptor.configurationVersion
+        else {
+            throw ImageTextSimilarityError.incompatibleConfiguration
+        }
+        guard textDescriptor.tokenizerVersion == Self.tokenizerVersion else {
+            throw ImageTextSimilarityError.incompatibleTokenizer
+        }
+        guard imageDescriptor.schemaVersion == SimilarityArtifactDescriptor.currentSchemaVersion else {
+            throw ImageTextSimilarityError.invalidImageSchemaVersion(imageDescriptor.schemaVersion)
+        }
+
+        let imageEmbedding: ImageEmbedding
+        do {
+            imageEmbedding = try JSONDecoder().decode(ImageEmbedding.self, from: image.payload)
+        } catch {
+            throw ImageTextSimilarityError.invalidImagePayload(String(describing: error))
+        }
+        guard EmbeddingArtifact(
+            descriptor: imageDescriptor,
+            embedding: imageEmbedding
+        ).isInternallyConsistent else {
+            throw ImageTextSimilarityError.invalidImagePayload(
+                "The vector payload does not match its artifact descriptor."
+            )
+        }
+        guard imageEmbedding.values.allSatisfy(\.isFinite) else {
+            throw ImageTextSimilarityError.invalidImagePayload(
+                "The image vector contains a non-finite value."
+            )
+        }
+        let squaredMagnitude = imageEmbedding.values.reduce(Float.zero) {
+            $0 + $1 * $1
+        }
+        guard squaredMagnitude.isFinite, squaredMagnitude > 0 else {
+            throw ImageTextSimilarityError.invalidImagePayload(
+                "The image vector has zero or invalid magnitude."
+            )
+        }
+        let magnitude = sqrt(squaredMagnitude)
+        guard abs(magnitude - 1) <= TextEmbedding.normalizationTolerance else {
+            throw ImageTextSimilarityError.invalidImagePayload(
+                "The image vector is not L2-normalized."
+            )
+        }
+
+        let similarity = zip(imageEmbedding.values, validatedText.values)
+            .reduce(Float.zero) { $0 + $1.0 * $1.1 }
+        guard similarity.isFinite else {
+            throw ImageTextSimilarityError.invalidImagePayload(
+                "The image/text similarity is not finite."
+            )
+        }
+        return max(-1, min(1, similarity))
+    }
+
     private func imageEmbedding(for image: CGImage, model: LoadedCLIPModel) async throws -> [Float] {
         let imageInput = try Self.makeImageInput(image, descriptor: model.imageDescriptor)
         let tokenInput = Self.makeTokenInput(model.dummyTokens, descriptor: model.inputIDsDescriptor)
-        let attentionMaskInput = Self.makeAttentionMaskInput(descriptor: model.attentionMaskDescriptor)
+        let attentionMaskInput = Self.makeAttentionMaskInput(
+            Self.attentionMasks(for: model.dummyTokens),
+            descriptor: model.attentionMaskDescriptor
+        )
 
         var outputs = try await model.function.run(inputs: [
             model.imageInputName: imageInput,
@@ -118,6 +263,39 @@ public actor CoreAICLIPProvider:
             throw CLIPProviderError.invalidModel("CLIP image embedding output is empty.")
         }
         return values
+    }
+
+    private func textEmbedding(
+        for batch: CLIPTextBatch,
+        model: LoadedCLIPModel
+    ) async throws -> [Float] {
+        guard let textEmbedsOutputName = model.textEmbedsOutputName else {
+            throw CLIPTextInferenceError.missingTextEmbedsOutput
+        }
+        let imageInput = try Self.makeZeroImageInput(descriptor: model.imageDescriptor)
+        let tokenInput = Self.makeTokenInput(
+            batch.tokenIDs,
+            descriptor: model.inputIDsDescriptor
+        )
+        let attentionMaskInput = Self.makeAttentionMaskInput(
+            batch.attentionMask,
+            descriptor: model.attentionMaskDescriptor
+        )
+
+        try Task.checkCancellation()
+        var outputs = try await model.function.run(inputs: [
+            model.imageInputName: imageInput,
+            model.inputIDsInputName: tokenInput,
+            model.attentionMaskInputName: attentionMaskInput,
+        ])
+        try Task.checkCancellation()
+        guard let embeddingOutput = outputs.remove(textEmbedsOutputName)?.ndArray else {
+            throw CLIPTextInferenceError.missingTextEmbedsOutput
+        }
+        return try Self.validatedTextEmbeddingValues(
+            embeddingOutput,
+            expectedBatchSize: batch.tokenIDs.count
+        )
     }
 
     private func loadModel() async throws -> LoadedCLIPModel {
@@ -148,6 +326,9 @@ public actor CoreAICLIPProvider:
         let inputIDsInputName = try Self.requiredName("input_ids", kind: "input", names: descriptor.inputNames)
         let attentionMaskInputName = try Self.requiredName("attention_mask", kind: "input", names: descriptor.inputNames)
         let imageEmbedsOutputName = try Self.requiredName("image_embeds", kind: "output", names: descriptor.outputNames)
+        let textEmbedsOutputName = descriptor.outputNames.contains("text_embeds")
+            ? "text_embeds"
+            : nil
 
         guard case let .ndArray(imageDescriptor) = descriptor.inputDescriptor(of: imageInputName),
               case let .ndArray(inputIDsDescriptor) = descriptor.inputDescriptor(of: inputIDsInputName),
@@ -163,6 +344,21 @@ public actor CoreAICLIPProvider:
                 "Unexpected CLIP input shapes: image=\(imageDescriptor.shape), input_ids=\(inputIDsDescriptor.shape), attention_mask=\(attentionMaskDescriptor.shape)."
             )
         }
+        guard inputIDsDescriptor.shape == attentionMaskDescriptor.shape,
+              inputIDsDescriptor.shape[0] > 0,
+              inputIDsDescriptor.shape[1] > 1
+        else {
+            throw CLIPProviderError.invalidModel(
+                "CLIP token and attention-mask inputs must have matching, non-empty shapes."
+            )
+        }
+        guard inputIDsDescriptor.scalarType == .int32,
+              attentionMaskDescriptor.scalarType == .int32
+        else {
+            throw CLIPProviderError.invalidModel(
+                "CLIP token and attention-mask inputs must use Int32 scalars."
+            )
+        }
 
         let textBatchSize = inputIDsDescriptor.shape[0]
         let sequenceLength = inputIDsDescriptor.shape[1]
@@ -176,9 +372,11 @@ public actor CoreAICLIPProvider:
             inputIDsInputName: inputIDsInputName,
             attentionMaskInputName: attentionMaskInputName,
             imageEmbedsOutputName: imageEmbedsOutputName,
+            textEmbedsOutputName: textEmbedsOutputName,
             imageDescriptor: imageDescriptor,
             inputIDsDescriptor: inputIDsDescriptor,
             attentionMaskDescriptor: attentionMaskDescriptor,
+            tokenizer: tokenizer,
             dummyTokens: dummyTokens
         )
         loadedModel = loaded
@@ -232,6 +430,29 @@ public actor CoreAICLIPProvider:
         return array
     }
 
+    private nonisolated static func makeZeroImageInput(
+        descriptor: NDArrayDescriptor
+    ) throws -> NDArray {
+        let shape = descriptor.shape
+        guard shape.count == 4, shape[0] == 1, shape[1] == 3 else {
+            throw CLIPTextInferenceError.invalidImageInputShape(shape)
+        }
+        let count = shape.reduce(1, *)
+        var array = NDArray(descriptor: descriptor)
+        if descriptor.scalarType == .float16 {
+            #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
+                fillNDArray(&array, as: Float16.self, count: count) { _ in 0 }
+            #else
+                throw CLIPTextInferenceError.unsupportedInputScalarType
+            #endif
+        } else if descriptor.scalarType == .float32 {
+            fillNDArray(&array, as: Float.self, count: count) { _ in 0 }
+        } else {
+            throw CLIPTextInferenceError.unsupportedInputScalarType
+        }
+        return array
+    }
+
     private nonisolated static func makeTokenInput(
         _ tokens: [[Int32]],
         descriptor: NDArrayDescriptor
@@ -251,12 +472,66 @@ public actor CoreAICLIPProvider:
     }
 
     private nonisolated static func makeAttentionMaskInput(
+        _ masks: [[Int32]],
         descriptor: NDArrayDescriptor
     ) -> NDArray {
-        let count = descriptor.shape[0] * descriptor.shape[1]
+        let batchSize = descriptor.shape[0]
+        let sequenceLength = descriptor.shape[1]
         var array = NDArray(descriptor: descriptor)
-        fillNDArray(&array, as: Int32.self, count: count) { _ in 1 }
+        fillNDArray(
+            &array,
+            as: Int32.self,
+            count: batchSize * sequenceLength
+        ) { index in
+            let row = index / sequenceLength
+            let column = index % sequenceLength
+            guard row < masks.count, column < masks[row].count else { return 0 }
+            return masks[row][column]
+        }
         return array
+    }
+
+    static func makeTextBatch(
+        queryTokens: [Int32],
+        fillerTokens: [Int32],
+        batchSize: Int,
+        sequenceLength: Int
+    ) throws -> CLIPTextBatch {
+        guard batchSize > 0, sequenceLength > 1 else {
+            throw CLIPTextInferenceError.invalidTokenInputShape(
+                [batchSize, sequenceLength]
+            )
+        }
+        let query = normalizedTokenRow(queryTokens, sequenceLength: sequenceLength)
+        let filler = normalizedTokenRow(fillerTokens, sequenceLength: sequenceLength)
+        let rows = [query] + Array(repeating: filler, count: batchSize - 1)
+        return CLIPTextBatch(
+            tokenIDs: rows,
+            attentionMask: attentionMasks(for: rows)
+        )
+    }
+
+    private nonisolated static func normalizedTokenRow(
+        _ tokens: [Int32],
+        sequenceLength: Int
+    ) -> [Int32] {
+        if tokens.count >= sequenceLength {
+            var result = Array(tokens.prefix(sequenceLength))
+            result[sequenceLength - 1] = CLIPTokenizer.eotTokenId
+            return result
+        }
+        return tokens + Array(
+            repeating: CLIPTokenizer.eotTokenId,
+            count: sequenceLength - tokens.count
+        )
+    }
+
+    static func attentionMasks(for tokenRows: [[Int32]]) -> [[Int32]] {
+        tokenRows.map { row in
+            let terminalIndex = row.dropFirst().firstIndex(of: CLIPTokenizer.eotTokenId)
+                ?? (row.indices.last ?? 0)
+            return row.indices.map { $0 <= terminalIndex ? 1 : 0 }
+        }
     }
 
     private nonisolated static func preprocessCLIPImage(
@@ -313,7 +588,7 @@ public actor CoreAICLIPProvider:
         count: Int,
         using generator: (Int) -> T
     ) {
-        var view = array.mutableView(as: T.self)
+        let view = array.mutableView(as: T.self)
         view.withUnsafeMutablePointer { pointer, _, _ in
             for index in 0 ..< count { pointer[index] = generator(index) }
         }
@@ -330,6 +605,41 @@ public actor CoreAICLIPProvider:
         default:
             []
         }
+    }
+
+    static func validatedTextEmbeddingValues(
+        _ array: NDArray,
+        expectedBatchSize: Int
+    ) throws -> [Float] {
+        let shape = array.shape
+        guard shape.count == 2,
+              shape[0] == expectedBatchSize,
+              shape[1] > 0
+        else {
+            throw CLIPTextInferenceError.unexpectedOutputShape(
+                expectedBatchSize: expectedBatchSize,
+                actual: shape
+            )
+        }
+        let values: [Float]
+        switch array.scalarType {
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
+        case .float16:
+            values = flattenNDArray(array, as: Float16.self)
+        #endif
+        case .float32:
+            values = flattenNDArray(array, as: Float.self)
+        default:
+            throw CLIPTextInferenceError.unsupportedOutputScalarType
+        }
+        let expectedCount = shape[0] * shape[1]
+        guard values.count == expectedCount else {
+            throw CLIPTextInferenceError.inconsistentOutputElementCount(
+                expected: expectedCount,
+                actual: values.count
+            )
+        }
+        return Array(values.prefix(shape[1]))
     }
 
     private nonisolated static func flattenNDArray<T: BinaryFloatingPoint & BitwiseCopyable>(
@@ -350,11 +660,18 @@ public actor CoreAICLIPProvider:
         let inputIDsInputName: String
         let attentionMaskInputName: String
         let imageEmbedsOutputName: String
+        let textEmbedsOutputName: String?
         let imageDescriptor: NDArrayDescriptor
         let inputIDsDescriptor: NDArrayDescriptor
         let attentionMaskDescriptor: NDArrayDescriptor
+        let tokenizer: CLIPTokenizer
         let dummyTokens: [[Int32]]
     }
+}
+
+struct CLIPTextBatch: Equatable, Sendable {
+    let tokenIDs: [[Int32]]
+    let attentionMask: [[Int32]]
 }
 
 public enum CLIPProviderError: Error, CustomStringConvertible, Sendable {
@@ -373,6 +690,17 @@ public enum CLIPProviderError: Error, CustomStringConvertible, Sendable {
 
 public enum CLIPSimilarityArtifactError: Error, Equatable, Sendable {
     case invalidPayload(String)
+}
+
+public enum CLIPTextInferenceError: Error, Equatable, Sendable {
+    case invalidTokenInputShape([Int])
+    case invalidImageInputShape([Int])
+    case unsupportedInputScalarType
+    case missingTextEmbedsOutput
+    case unexpectedOutputShape(expectedBatchSize: Int, actual: [Int])
+    case unsupportedOutputScalarType
+    case inconsistentOutputElementCount(expected: Int, actual: Int)
+    case invalidEmbedding(TextEmbeddingValidationError)
 }
 
 public extension ModelBundleDescriptor {

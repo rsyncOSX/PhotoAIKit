@@ -58,6 +58,7 @@ let package = Package(
                 "CoreAICLIPBackend",
                 "CoreAISAM3Backend",
                 "VisionFeaturePrintBackend",
+                .product(name: "CoreAISegmentation", package: "coreai-models"),
             ]
         ),
     ],
