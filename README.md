@@ -58,6 +58,13 @@ for new artifacts.
 
 No default Application Support path, `Bundle.main` lookup, or package resource fallback is used.
 
+CLIP metadata version 0.4 makes the model contract explicit: architecture,
+pretrained checkpoint, embedding dimensions, tokenizer context, input
+resolution, resize/crop/interpolation, normalization, and named Core AI
+functions. The provider still accepts older PhotoAIKit bundles as the original
+224-pixel stretch baseline. New exports use the model-correct shortest-side
+resize followed by a center crop.
+
 ## Host integration
 
 Map the app's photo type to `AIImageSource`, provide an `ImageDecoding` adapter, and inject model/cache URLs:
@@ -168,14 +175,27 @@ Package-neutral developer tools live under `Tools`. Output locations are always
 explicit and no script defaults to an application resource directory:
 
 ```sh
-uv run Tools/export_clip.py --output-dir /path/to/models
+uv run Tools/export_clip.py \
+  --model openclip-datacomp \
+  --output-dir /path/to/models \
+  --bundle-name CLIP-DataComp
+
+uv run Tools/export_clip.py \
+  --model openai \
+  --output-dir /path/to/models \
+  --bundle-name CLIP-OpenAI
+
 uv run Tools/export_sam3.py --output-dir /path/to/models
 python3 Tools/select_sam3_asset.py sam3_float16.aimodel \
   --bundle-dir /path/to/models/SAM3
 ```
 
-Export and selection write the fingerprint manifest consumed by
-`ModelBundleResolver`.
+The CLIP exporter supports the existing OpenAI
+`clip-vit-base-patch32` model and OpenCLIP `ViT-B-32-256` with
+`datacomp_s34b_b86k` weights. It exports `image_encoder` and `text_encoder` as
+two named functions in one Core AI asset and verifies that OpenCLIP and the
+saved PhotoAIKit tokenizer produce identical token IDs. Export and selection
+write the fingerprint manifest consumed by `ModelBundleResolver`.
 
 ## Deliberate host responsibilities
 

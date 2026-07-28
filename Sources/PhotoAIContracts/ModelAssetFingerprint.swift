@@ -179,8 +179,23 @@ public enum ModelAssetFingerprinter {
     /// sorted relative path, NUL, decimal byte count, NUL, then file bytes.
     private static func sha256(ofDirectoryTree directoryURL: URL) throws -> String {
         var hasher = SHA256()
-        for fileURL in try regularFiles(in: directoryURL) {
-            let relativePath = String(fileURL.path.dropFirst(directoryURL.path.count + 1))
+        let resolvedDirectoryURL = directoryURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let fileURLs = try regularFiles(in: resolvedDirectoryURL)
+            .map {
+                $0.resolvingSymlinksInPath().standardizedFileURL
+            }
+            .sorted { $0.path < $1.path }
+        let directoryPrefix = resolvedDirectoryURL.path + "/"
+        for fileURL in fileURLs {
+            guard fileURL.path.hasPrefix(directoryPrefix) else {
+                throw ModelAssetFingerprintError.unreadableAsset(
+                    fileURL,
+                    "Enumerated model file is outside its asset directory."
+                )
+            }
+            let relativePath = String(fileURL.path.dropFirst(directoryPrefix.count))
             let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
             let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
             hasher.update(data: Data(relativePath.utf8))

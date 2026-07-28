@@ -13,6 +13,7 @@ public actor CoreAICLIPProvider:
     ImageTextSimilarityComparing
 {
     public nonisolated let modelIdentity: ModelIdentity
+    public nonisolated let runtimeConfiguration: CLIPRuntimeConfiguration
 
     public nonisolated static let resourceDescriptor = ModelResourceDescriptor.clip
     public nonisolated static let tokenizerVersion = "clip-bpe-tokenizer-v1"
@@ -28,9 +29,9 @@ public actor CoreAICLIPProvider:
             backend: "clip",
             modelFingerprint: modelIdentity.artifactIdentifier,
             representation: "normalized-float-vector-json-v1",
-            preprocessingVersion: Self.resourceDescriptor.preprocessingVersion,
-            normalizationVersion: "l2-v1",
-            configurationVersion: Self.resourceDescriptor.configurationVersion
+            preprocessingVersion: runtimeConfiguration.preprocessing.version,
+            normalizationVersion: runtimeConfiguration.normalizationVersion,
+            configurationVersion: runtimeConfiguration.configurationVersion
         )
     }
 
@@ -42,8 +43,14 @@ public actor CoreAICLIPProvider:
         guard case let .valid(_, identity) = resolver.status(at: modelBundleURL) else {
             throw CLIPProviderError.invalidModelBundle(resolver.status(at: modelBundleURL))
         }
+        let metadataURL = modelBundleURL.appendingPathComponent("metadata.json")
+        let metadata = try JSONDecoder().decode(
+            ModelBundleMetadata.self,
+            from: Data(contentsOf: metadataURL)
+        )
         self.modelBundleURL = modelBundleURL
         self.modelIdentity = identity
+        self.runtimeConfiguration = try CLIPRuntimeConfiguration(metadata: metadata)
     }
 
     public func embedding(for image: CGImage) async throws -> ImageEmbedding {
@@ -62,12 +69,21 @@ public actor CoreAICLIPProvider:
         try Task.checkCancellation()
 
         let sequenceLength = model.inputIDsDescriptor.shape[1]
-        let queryTokens = model.tokenizer.encode(text, contextLength: sequenceLength)
+        let paddingTokenID = runtimeConfiguration.tokenizer.paddingTokenID
+            ?? CLIPTokenizer.eotTokenId
+        let queryTokens = Self.applyingPaddingToken(
+            to: model.tokenizer.encode(
+                text,
+                contextLength: sequenceLength
+            ),
+            paddingTokenID: paddingTokenID
+        )
         let batch = try Self.makeTextBatch(
             queryTokens: queryTokens,
             fillerTokens: model.dummyTokens[0],
             batchSize: model.inputIDsDescriptor.shape[0],
-            sequenceLength: sequenceLength
+            sequenceLength: sequenceLength,
+            paddingTokenID: paddingTokenID
         )
 
         try Task.checkCancellation()
@@ -79,7 +95,7 @@ public actor CoreAICLIPProvider:
                 descriptor: TextEmbeddingDescriptor(
                     backend: backendDescriptor,
                     dimensions: values.count,
-                    tokenizerVersion: Self.tokenizerVersion
+                    tokenizerVersion: runtimeConfiguration.tokenizer.version
                 ),
                 values: values
             )
@@ -191,7 +207,7 @@ public actor CoreAICLIPProvider:
         else {
             throw ImageTextSimilarityError.incompatibleConfiguration
         }
-        guard textDescriptor.tokenizerVersion == Self.tokenizerVersion else {
+        guard textDescriptor.tokenizerVersion == runtimeConfiguration.tokenizer.version else {
             throw ImageTextSimilarityError.incompatibleTokenizer
         }
         guard imageDescriptor.schemaVersion == SimilarityArtifactDescriptor.currentSchemaVersion else {
@@ -243,18 +259,27 @@ public actor CoreAICLIPProvider:
     }
 
     private func imageEmbedding(for image: CGImage, model: LoadedCLIPModel) async throws -> [Float] {
-        let imageInput = try Self.makeImageInput(image, descriptor: model.imageDescriptor)
-        let tokenInput = Self.makeTokenInput(model.dummyTokens, descriptor: model.inputIDsDescriptor)
-        let attentionMaskInput = Self.makeAttentionMaskInput(
-            Self.attentionMasks(for: model.dummyTokens),
-            descriptor: model.attentionMaskDescriptor
+        let imageInput = try Self.makeImageInput(
+            image,
+            descriptor: model.imageDescriptor,
+            preprocessing: runtimeConfiguration.preprocessing
         )
+        var inputs = [model.imageInputName: imageInput]
+        if model.imageFunctionRequiresTextInputs {
+            inputs[model.inputIDsInputName] = Self.makeTokenInput(
+                model.dummyTokens,
+                descriptor: model.inputIDsDescriptor
+            )
+            if let attentionMaskDescriptor = model.attentionMaskDescriptor,
+               let attentionMaskInputName = model.attentionMaskInputName {
+                inputs[attentionMaskInputName] = Self.makeAttentionMaskInput(
+                    Self.attentionMasks(for: model.dummyTokens),
+                    descriptor: attentionMaskDescriptor
+                )
+            }
+        }
 
-        var outputs = try await model.function.run(inputs: [
-            model.imageInputName: imageInput,
-            model.inputIDsInputName: tokenInput,
-            model.attentionMaskInputName: attentionMaskInput,
-        ])
+        var outputs = try await model.imageFunction.run(inputs: inputs)
         guard let embeddingOutput = outputs.remove(model.imageEmbedsOutputName)?.ndArray else {
             throw CLIPProviderError.invalidModel("CLIP image embedding output is missing.")
         }
@@ -262,6 +287,7 @@ public actor CoreAICLIPProvider:
         guard !values.isEmpty else {
             throw CLIPProviderError.invalidModel("CLIP image embedding output is empty.")
         }
+        try validateEmbeddingDimensions(values.count)
         return values
     }
 
@@ -269,33 +295,49 @@ public actor CoreAICLIPProvider:
         for batch: CLIPTextBatch,
         model: LoadedCLIPModel
     ) async throws -> [Float] {
-        guard let textEmbedsOutputName = model.textEmbedsOutputName else {
-            throw CLIPTextInferenceError.missingTextEmbedsOutput
-        }
-        let imageInput = try Self.makeZeroImageInput(descriptor: model.imageDescriptor)
+        let textEmbedsOutputName = model.textEmbedsOutputName
         let tokenInput = Self.makeTokenInput(
             batch.tokenIDs,
             descriptor: model.inputIDsDescriptor
         )
-        let attentionMaskInput = Self.makeAttentionMaskInput(
-            batch.attentionMask,
-            descriptor: model.attentionMaskDescriptor
-        )
+        var inputs = [model.inputIDsInputName: tokenInput]
+        if let attentionMaskDescriptor = model.attentionMaskDescriptor,
+           let attentionMaskInputName = model.attentionMaskInputName {
+            inputs[attentionMaskInputName] = Self.makeAttentionMaskInput(
+                batch.attentionMask,
+                descriptor: attentionMaskDescriptor
+            )
+        }
+        if model.textFunctionRequiresImageInput {
+            inputs[model.imageInputName] = try Self.makeZeroImageInput(
+                descriptor: model.imageDescriptor
+            )
+        }
 
         try Task.checkCancellation()
-        var outputs = try await model.function.run(inputs: [
-            model.imageInputName: imageInput,
-            model.inputIDsInputName: tokenInput,
-            model.attentionMaskInputName: attentionMaskInput,
-        ])
+        var outputs = try await model.textFunction.run(inputs: inputs)
         try Task.checkCancellation()
         guard let embeddingOutput = outputs.remove(textEmbedsOutputName)?.ndArray else {
             throw CLIPTextInferenceError.missingTextEmbedsOutput
         }
-        return try Self.validatedTextEmbeddingValues(
+        let values = try Self.validatedTextEmbeddingValues(
             embeddingOutput,
             expectedBatchSize: batch.tokenIDs.count
         )
+        try validateEmbeddingDimensions(values.count)
+        return values
+    }
+
+    private func validateEmbeddingDimensions(_ dimensions: Int) throws {
+        guard let expected = runtimeConfiguration.embeddingDimensions else {
+            return
+        }
+        guard dimensions == expected else {
+            throw CLIPProviderError.invalidModel(
+                "CLIP embedding dimension \(dimensions) does not match "
+                    + "metadata.json (\(expected))."
+            )
+        }
     }
 
     private func loadModel() async throws -> LoadedCLIPModel {
@@ -314,60 +356,128 @@ public actor CoreAICLIPProvider:
             folder: modelBundleURL.appendingPathComponent("tokenizer", isDirectory: true)
         )
 
-        let model = try await AIModel(contentsOf: modelURL, options: Self.specializationOptions())
-        guard let descriptor = model.functionDescriptor(for: "main") else {
-            throw CLIPProviderError.invalidModel("Cannot find main function in CLIP model.")
+        let model = try await AIModel(
+            contentsOf: modelURL,
+            options: Self.specializationOptions()
+        )
+        let imageFunctionName = runtimeConfiguration.imageFunctionName
+        let textFunctionName = runtimeConfiguration.textFunctionName
+        guard let imageFunctionDescriptor = model.functionDescriptor(
+            for: imageFunctionName
+        ) else {
+            throw CLIPProviderError.invalidModel(
+                "Cannot find \(imageFunctionName) in CLIP model."
+            )
         }
-        guard let function = try model.loadFunction(named: "main") else {
-            throw CLIPProviderError.invalidModel("Cannot load main function from CLIP model.")
+        guard let textFunctionDescriptor = model.functionDescriptor(
+            for: textFunctionName
+        ) else {
+            throw CLIPProviderError.invalidModel(
+                "Cannot find \(textFunctionName) in CLIP model."
+            )
+        }
+        guard let imageFunction = try model.loadFunction(
+            named: imageFunctionName
+        ) else {
+            throw CLIPProviderError.invalidModel(
+                "Cannot load \(imageFunctionName) from CLIP model."
+            )
+        }
+        guard let textFunction = try model.loadFunction(
+            named: textFunctionName
+        ) else {
+            throw CLIPProviderError.invalidModel(
+                "Cannot load \(textFunctionName) from CLIP model."
+            )
         }
 
-        let imageInputName = try Self.requiredName("pixel_values", kind: "input", names: descriptor.inputNames)
-        let inputIDsInputName = try Self.requiredName("input_ids", kind: "input", names: descriptor.inputNames)
-        let attentionMaskInputName = try Self.requiredName("attention_mask", kind: "input", names: descriptor.inputNames)
-        let imageEmbedsOutputName = try Self.requiredName("image_embeds", kind: "output", names: descriptor.outputNames)
-        let textEmbedsOutputName = descriptor.outputNames.contains("text_embeds")
-            ? "text_embeds"
-            : nil
+        let imageInputName = try Self.requiredName(
+            "pixel_values",
+            kind: "input",
+            names: imageFunctionDescriptor.inputNames
+        )
+        let inputIDsInputName = try Self.requiredName(
+            "input_ids",
+            kind: "input",
+            names: textFunctionDescriptor.inputNames
+        )
+        let attentionMaskInputName = textFunctionDescriptor.inputNames
+            .contains("attention_mask") ? "attention_mask" : nil
+        let imageEmbedsOutputName = try Self.requiredName(
+            "image_embeds",
+            kind: "output",
+            names: imageFunctionDescriptor.outputNames
+        )
+        let textEmbedsOutputName = try Self.requiredName(
+            "text_embeds",
+            kind: "output",
+            names: textFunctionDescriptor.outputNames
+        )
 
-        guard case let .ndArray(imageDescriptor) = descriptor.inputDescriptor(of: imageInputName),
-              case let .ndArray(inputIDsDescriptor) = descriptor.inputDescriptor(of: inputIDsInputName),
-              case let .ndArray(attentionMaskDescriptor) = descriptor.inputDescriptor(of: attentionMaskInputName)
+        guard case let .ndArray(imageDescriptor) =
+            imageFunctionDescriptor.inputDescriptor(of: imageInputName),
+            case let .ndArray(inputIDsDescriptor) =
+            textFunctionDescriptor.inputDescriptor(of: inputIDsInputName)
         else {
             throw CLIPProviderError.invalidModel("CLIP inputs are not NDArrays.")
         }
+        let attentionMaskDescriptor: NDArrayDescriptor? = if let attentionMaskInputName {
+            if case let .ndArray(descriptor) =
+                textFunctionDescriptor.inputDescriptor(of: attentionMaskInputName) {
+                descriptor
+            } else {
+                nil
+            }
+        } else {
+            nil
+        }
         guard imageDescriptor.shape.count == 4,
-              inputIDsDescriptor.shape.count == 2,
-              attentionMaskDescriptor.shape.count == 2
+              inputIDsDescriptor.shape.count == 2
         else {
             throw CLIPProviderError.invalidModel(
-                "Unexpected CLIP input shapes: image=\(imageDescriptor.shape), input_ids=\(inputIDsDescriptor.shape), attention_mask=\(attentionMaskDescriptor.shape)."
+                "Unexpected CLIP input shapes: image=\(imageDescriptor.shape), input_ids=\(inputIDsDescriptor.shape)."
             )
         }
-        guard inputIDsDescriptor.shape == attentionMaskDescriptor.shape,
-              inputIDsDescriptor.shape[0] > 0,
-              inputIDsDescriptor.shape[1] > 1
+        guard inputIDsDescriptor.shape[0] > 0,
+              inputIDsDescriptor.shape[1] > 1,
+              inputIDsDescriptor.scalarType == .int32
         else {
             throw CLIPProviderError.invalidModel(
-                "CLIP token and attention-mask inputs must have matching, non-empty shapes."
+                "CLIP token input must be a non-empty Int32 [batch, context] array."
             )
         }
-        guard inputIDsDescriptor.scalarType == .int32,
-              attentionMaskDescriptor.scalarType == .int32
+        if let attentionMaskDescriptor {
+            guard attentionMaskDescriptor.shape == inputIDsDescriptor.shape,
+                  attentionMaskDescriptor.scalarType == .int32
+            else {
+                throw CLIPProviderError.invalidModel(
+                    "CLIP attention-mask input must match the Int32 token input."
+                )
+            }
+        }
+        guard imageDescriptor.shape[2] == runtimeConfiguration.preprocessing.height,
+              imageDescriptor.shape[3] == runtimeConfiguration.preprocessing.width,
+              inputIDsDescriptor.shape[1] == runtimeConfiguration.tokenizer.contextLength
         else {
             throw CLIPProviderError.invalidModel(
-                "CLIP token and attention-mask inputs must use Int32 scalars."
+                "CLIP model inputs do not match metadata.json."
             )
         }
 
         let textBatchSize = inputIDsDescriptor.shape[0]
         let sequenceLength = inputIDsDescriptor.shape[1]
+        let emptyTokens = Self.applyingPaddingToken(
+            to: tokenizer.encode("a photo", contextLength: sequenceLength),
+            paddingTokenID: runtimeConfiguration.tokenizer.paddingTokenID
+                ?? CLIPTokenizer.eotTokenId
+        )
         let dummyTokens = Array(
-            repeating: tokenizer.encode("a photo", contextLength: sequenceLength),
+            repeating: emptyTokens,
             count: textBatchSize
         )
         let loaded = LoadedCLIPModel(
-            function: function,
+            imageFunction: imageFunction,
+            textFunction: textFunction,
             imageInputName: imageInputName,
             inputIDsInputName: inputIDsInputName,
             attentionMaskInputName: attentionMaskInputName,
@@ -377,7 +487,11 @@ public actor CoreAICLIPProvider:
             inputIDsDescriptor: inputIDsDescriptor,
             attentionMaskDescriptor: attentionMaskDescriptor,
             tokenizer: tokenizer,
-            dummyTokens: dummyTokens
+            dummyTokens: dummyTokens,
+            imageFunctionRequiresTextInputs: imageFunctionDescriptor.inputNames
+                .contains(inputIDsInputName),
+            textFunctionRequiresImageInput: textFunctionDescriptor.inputNames
+                .contains(imageInputName)
         )
         loadedModel = loaded
         return loaded
@@ -404,7 +518,8 @@ public actor CoreAICLIPProvider:
 
     private nonisolated static func makeImageInput(
         _ image: CGImage,
-        descriptor: NDArrayDescriptor
+        descriptor: NDArrayDescriptor,
+        preprocessing: ModelImagePreprocessingMetadata
     ) throws -> NDArray {
         let shape = descriptor.shape
         let batchSize = shape[0]
@@ -416,7 +531,15 @@ public actor CoreAICLIPProvider:
                 "Expected CLIP image input shape [1, 3, H, W], got \(shape)."
             )
         }
-        let pixels = try preprocessCLIPImage(image, width: width, height: height)
+        guard width == preprocessing.width, height == preprocessing.height else {
+            throw CLIPProviderError.invalidModel(
+                "CLIP image input shape does not match preprocessing metadata."
+            )
+        }
+        let pixels = try preprocessCLIPImage(
+            image,
+            preprocessing: preprocessing
+        )
         var array = NDArray(descriptor: descriptor)
         if descriptor.scalarType == .float16 {
             #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
@@ -495,15 +618,24 @@ public actor CoreAICLIPProvider:
         queryTokens: [Int32],
         fillerTokens: [Int32],
         batchSize: Int,
-        sequenceLength: Int
+        sequenceLength: Int,
+        paddingTokenID: Int32 = CLIPTokenizer.eotTokenId
     ) throws -> CLIPTextBatch {
         guard batchSize > 0, sequenceLength > 1 else {
             throw CLIPTextInferenceError.invalidTokenInputShape(
                 [batchSize, sequenceLength]
             )
         }
-        let query = normalizedTokenRow(queryTokens, sequenceLength: sequenceLength)
-        let filler = normalizedTokenRow(fillerTokens, sequenceLength: sequenceLength)
+        let query = normalizedTokenRow(
+            queryTokens,
+            sequenceLength: sequenceLength,
+            paddingTokenID: paddingTokenID
+        )
+        let filler = normalizedTokenRow(
+            fillerTokens,
+            sequenceLength: sequenceLength,
+            paddingTokenID: paddingTokenID
+        )
         let rows = [query] + Array(repeating: filler, count: batchSize - 1)
         return CLIPTextBatch(
             tokenIDs: rows,
@@ -513,7 +645,8 @@ public actor CoreAICLIPProvider:
 
     private nonisolated static func normalizedTokenRow(
         _ tokens: [Int32],
-        sequenceLength: Int
+        sequenceLength: Int,
+        paddingTokenID: Int32
     ) -> [Int32] {
         if tokens.count >= sequenceLength {
             var result = Array(tokens.prefix(sequenceLength))
@@ -521,9 +654,28 @@ public actor CoreAICLIPProvider:
             return result
         }
         return tokens + Array(
-            repeating: CLIPTokenizer.eotTokenId,
+            repeating: paddingTokenID,
             count: sequenceLength - tokens.count
         )
+    }
+
+    static func applyingPaddingToken(
+        to tokens: [Int32],
+        paddingTokenID: Int32
+    ) -> [Int32] {
+        guard tokens.count > 1,
+              paddingTokenID != CLIPTokenizer.eotTokenId,
+              let terminalIndex = tokens.dropFirst()
+                  .firstIndex(of: CLIPTokenizer.eotTokenId),
+              terminalIndex < tokens.index(before: tokens.endIndex)
+        else {
+            return tokens
+        }
+        var result = tokens
+        for index in result.index(after: terminalIndex) ..< result.endIndex {
+            result[index] = paddingTokenID
+        }
+        return result
     }
 
     static func attentionMasks(for tokenRows: [[Int32]]) -> [[Int32]] {
@@ -534,19 +686,41 @@ public actor CoreAICLIPProvider:
         }
     }
 
-    private nonisolated static func preprocessCLIPImage(
+    nonisolated static func preprocessCLIPImage(
         _ image: CGImage,
-        width: Int,
-        height: Int
+        preprocessing: ModelImagePreprocessingMetadata
     ) throws -> [Float] {
+        let width = preprocessing.width
+        let height = preprocessing.height
         let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        var rgba = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let usesCenterCrop = preprocessing.resize == "shortest-side"
+            && preprocessing.crop == "center"
+        let sampledWidth: Int
+        let sampledHeight: Int
+        if usesCenterCrop, image.width > image.height {
+            sampledHeight = height
+            sampledWidth = Int(
+                Double(height) * Double(image.width) / Double(image.height)
+            )
+        } else if usesCenterCrop {
+            sampledWidth = width
+            sampledHeight = Int(
+                Double(width) * Double(image.height) / Double(image.width)
+            )
+        } else {
+            sampledWidth = width
+            sampledHeight = height
+        }
+        let bytesPerRow = sampledWidth * bytesPerPixel
+        var rgba = [UInt8](
+            repeating: 0,
+            count: sampledHeight * bytesPerRow
+        )
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(
                   data: &rgba,
-                  width: width,
-                  height: height,
+                  width: sampledWidth,
+                  height: sampledHeight,
                   bitsPerComponent: 8,
                   bytesPerRow: bytesPerRow,
                   space: colorSpace,
@@ -554,15 +728,39 @@ public actor CoreAICLIPProvider:
               )
         else { throw CLIPProviderError.imagePreprocessingFailed }
 
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        if usesCenterCrop {
+            context.interpolationQuality = .high
+        } else {
+            context.interpolationQuality = .medium
+        }
+        context.draw(
+            image,
+            in: CGRect(
+                x: 0,
+                y: 0,
+                width: sampledWidth,
+                height: sampledHeight
+            )
+        )
 
         let count = width * height
+        let cropX = Int(
+            (Double(sampledWidth - width) / 2)
+                .rounded(.toNearestOrEven)
+        )
+        let cropY = Int(
+            (Double(sampledHeight - height) / 2)
+                .rounded(.toNearestOrEven)
+        )
         var chw = [Float](repeating: 0, count: 3 * count)
-        let mean: [Float] = [0.48145466, 0.4578275, 0.40821073]
-        let standardDeviation: [Float] = [0.26862954, 0.26130258, 0.27577711]
+        let mean = preprocessing.mean
+        let standardDeviation = preprocessing.standardDeviation
         for pixel in 0 ..< count {
-            let offset = pixel * bytesPerPixel
+            let targetY = pixel / width
+            let targetX = pixel % width
+            let sampledPixel = (targetY + cropY) * sampledWidth
+                + targetX + cropX
+            let offset = sampledPixel * bytesPerPixel
             let red = Float(rgba[offset]) / 255
             let green = Float(rgba[offset + 1]) / 255
             let blue = Float(rgba[offset + 2]) / 255
@@ -655,17 +853,20 @@ public actor CoreAICLIPProvider:
     }
 
     private struct LoadedCLIPModel {
-        let function: InferenceFunction
+        let imageFunction: InferenceFunction
+        let textFunction: InferenceFunction
         let imageInputName: String
         let inputIDsInputName: String
-        let attentionMaskInputName: String
+        let attentionMaskInputName: String?
         let imageEmbedsOutputName: String
-        let textEmbedsOutputName: String?
+        let textEmbedsOutputName: String
         let imageDescriptor: NDArrayDescriptor
         let inputIDsDescriptor: NDArrayDescriptor
-        let attentionMaskDescriptor: NDArrayDescriptor
+        let attentionMaskDescriptor: NDArrayDescriptor?
         let tokenizer: CLIPTokenizer
         let dummyTokens: [[Int32]]
+        let imageFunctionRequiresTextInputs: Bool
+        let textFunctionRequiresImageInput: Bool
     }
 }
 

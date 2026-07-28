@@ -1,6 +1,7 @@
 @testable import CoreAICLIPBackend
 import CoreAI
 import CoreAIImageSegmenter
+import CoreGraphics
 import Foundation
 import PhotoAIContracts
 import Testing
@@ -282,6 +283,152 @@ struct CLIPTextCapabilityTests {
         }
     }
 
+    @Test("DataComp metadata selects 256-pixel dual-encoder runtime")
+    func dataCompRuntimeConfiguration() throws {
+        let preprocessing = ModelImagePreprocessingMetadata(
+            version: "clip-center-256-v2",
+            width: 256,
+            height: 256,
+            resize: "shortest-side",
+            crop: "center",
+            interpolation: "bicubic",
+            mean: [0.48145466, 0.4578275, 0.40821073],
+            standardDeviation: [0.26862954, 0.26130258, 0.27577711]
+        )
+        let metadata = ModelBundleMetadata(
+            name: "DataComp",
+            family: "clip",
+            sourceModel: "mlfoundations/open_clip",
+            architecture: "ViT-B-32-256",
+            pretrained: "datacomp_s34b_b86k",
+            metadataVersion: "0.4",
+            embeddingDimensions: 512,
+            assets: ["main": "datacomp.aimodel"],
+            assetFingerprints: nil,
+            preprocessing: preprocessing,
+            tokenizer: ModelTokenizerMetadata(
+                version: "clip-bpe-tokenizer-v1",
+                type: "clip-bpe",
+                contextLength: 77,
+                paddingTokenID: 0
+            ),
+            functions: [
+                "image": "image_encoder",
+                "text": "text_encoder",
+            ],
+            normalizationVersion: "l2-v1",
+            configurationVersion: "coreai-clip-dual-encoder-v2"
+        )
+
+        let configuration = try CLIPRuntimeConfiguration(metadata: metadata)
+
+        #expect(configuration.architecture == "ViT-B-32-256")
+        #expect(configuration.pretrained == "datacomp_s34b_b86k")
+        #expect(configuration.preprocessing == preprocessing)
+        #expect(configuration.embeddingDimensions == 512)
+        #expect(configuration.tokenizer.paddingTokenID == 0)
+        #expect(configuration.imageFunctionName == "image_encoder")
+        #expect(configuration.textFunctionName == "text_encoder")
+    }
+
+    @Test("CLIP preprocessing center-crops instead of stretching")
+    func centerCropPreprocessing() throws {
+        let image = try #require(colorBandImage())
+        let preprocessing = ModelImagePreprocessingMetadata(
+            version: "test-center-crop",
+            width: 2,
+            height: 2,
+            resize: "shortest-side",
+            crop: "center",
+            interpolation: "bicubic",
+            mean: [0, 0, 0],
+            standardDeviation: [1, 1, 1]
+        )
+
+        let values = try CoreAICLIPProvider.preprocessCLIPImage(
+            image,
+            preprocessing: preprocessing
+        )
+
+        #expect(values.count == 12)
+        let pixelsPerChannel = 4
+        let averageRed = values[0 ..< pixelsPerChannel].reduce(0, +)
+            / Float(pixelsPerChannel)
+        let averageGreen = values[
+            pixelsPerChannel ..< (pixelsPerChannel * 2)
+        ].reduce(0, +) / Float(pixelsPerChannel)
+        #expect(averageRed < 0.2)
+        #expect(averageGreen > 0.8)
+    }
+
+    @Test("CLIP preprocessing preserves top-to-bottom pixel orientation")
+    func preprocessingOrientation() throws {
+        let image = try #require(verticalBandImage())
+        let preprocessing = ModelImagePreprocessingMetadata(
+            version: "test-orientation",
+            width: 2,
+            height: 2,
+            resize: "stretch",
+            crop: "none",
+            interpolation: "bilinear",
+            mean: [0, 0, 0],
+            standardDeviation: [1, 1, 1]
+        )
+
+        let values = try CoreAICLIPProvider.preprocessCLIPImage(
+            image,
+            preprocessing: preprocessing
+        )
+
+        #expect(values[0] > 0.8)
+        #expect(values[1] > 0.8)
+        #expect(values[2] < 0.2)
+        #expect(values[3] < 0.2)
+    }
+
+    @Test("Legacy bundles retain the original 224-pixel stretch contract")
+    func legacyRuntimeConfiguration() throws {
+        let metadata = ModelBundleMetadata(
+            name: "legacy",
+            family: "clip",
+            assets: ["main": "legacy.aimodel"]
+        )
+
+        let configuration = try CLIPRuntimeConfiguration(metadata: metadata)
+
+        #expect(configuration.preprocessing.width == 224)
+        #expect(configuration.preprocessing.resize == "stretch")
+        #expect(configuration.preprocessing.crop == "none")
+        #expect(configuration.imageFunctionName == "main")
+        #expect(configuration.textFunctionName == "main")
+    }
+
+    @Test("DataComp token rows use zero padding after end-of-text")
+    func dataCompTokenPadding() {
+        let original: [Int32] = [
+            CLIPTokenizer.sotTokenId,
+            42,
+            CLIPTokenizer.eotTokenId,
+            CLIPTokenizer.eotTokenId,
+            CLIPTokenizer.eotTokenId,
+        ]
+
+        #expect(CoreAICLIPProvider.applyingPaddingToken(
+            to: original,
+            paddingTokenID: 0
+        ) == [
+            CLIPTokenizer.sotTokenId,
+            42,
+            CLIPTokenizer.eotTokenId,
+            0,
+            0,
+        ])
+        #expect(CoreAICLIPProvider.applyingPaddingToken(
+            to: original,
+            paddingTokenID: CLIPTokenizer.eotTokenId
+        ) == original)
+    }
+
     private func fixtureTokenizer() throws -> CLIPTokenizer {
         try CLIPTokenizer(
             vocab: [
@@ -339,6 +486,59 @@ struct CLIPTextCapabilityTests {
             try fixture.provider.similarity(image: image, text: text)
         }
     }
+}
+
+private func colorBandImage() -> CGImage? {
+    let width = 4
+    let height = 2
+    let red: [UInt8] = [255, 0, 0, 255]
+    let green: [UInt8] = [0, 255, 0, 255]
+    let row = red + green + green + red
+    let pixels = row + row
+    guard let provider = CGDataProvider(data: Data(pixels) as CFData) else {
+        return nil
+    }
+    return CGImage(
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(
+            rawValue: CGImageAlphaInfo.last.rawValue
+        ),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
+    )
+}
+
+private func verticalBandImage() -> CGImage? {
+    let width = 2
+    let height = 2
+    let red: [UInt8] = [255, 0, 0, 255]
+    let blue: [UInt8] = [0, 0, 255, 255]
+    let pixels = red + red + blue + blue
+    guard let provider = CGDataProvider(data: Data(pixels) as CFData) else {
+        return nil
+    }
+    return CGImage(
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(
+            rawValue: CGImageAlphaInfo.last.rawValue
+        ),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
+    )
 }
 
 private struct ComparisonFixture {

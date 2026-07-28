@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import sys
 from pathlib import Path
 
 
@@ -38,3 +40,9 @@ def _hash_file(path: Path) -> "hashlib._Hash":
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: model_fingerprint.py ASSET")
+    print(json.dumps(fingerprint_asset(Path(sys.argv[1])), indent=2))
