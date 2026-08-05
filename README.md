@@ -1,6 +1,6 @@
 # PhotoAIKit
 
-Reusable Core AI CLIP and SAM3 code extracted from RawCullSAM3. The package owns model inference, typed contracts, reusable indexing/segmentation workflows, and optional storage. It does not contain RawCull view models, UI, RAW-file decoding, helper-process behavior, or culling policy.
+Reusable Core AI CLIP, EfficientSAM, and SAM3 code extracted from RawCullSAM3. The package owns model inference, typed contracts, reusable indexing/segmentation workflows, and optional storage. It does not contain RawCull view models, UI, RAW-file decoding, helper-process behavior, or culling policy.
 
 ## Requirements
 
@@ -14,6 +14,7 @@ The package pins the same `apple/coreai-models` revision used by the source appl
 
 - `PhotoAIContracts`: model identities and verified fingerprints, capability/factory contracts, source values, typed image and text similarity values, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
 - `CoreAICLIPBackend`: actor-owned CLIP image preprocessing, text tokenization, Core AI inference, and image/text comparison.
+- `CoreAIEfficientSAMBackend`: actor-owned EfficientSAM point/grid inference and highest-confidence subject-mask adaptation.
 - `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, and mask decoding.
 - `VisionFeaturePrintBackend`: actor-owned Vision feature-print generation, opaque artifact coding, and native distance calculation.
 - `PhotoAIWorkflows`: bounded vector/opaque artifact indexing, configurable fallback, cosine similarity, segmentation preprocessing/batching, versioned batch transport, mask cataloging, prompt fallback, best-mask selection, geometry, and quality classification.
@@ -25,9 +26,11 @@ The host application locates, downloads, bookmarks, or otherwise manages models.
 
 ```swift
 import CoreAICLIPBackend
+import CoreAIEfficientSAMBackend
 import CoreAISAM3Backend
 
 let clip = try CoreAICLIPProvider(modelBundleURL: clipBundleURL)
+let efficientSAM = try CoreAIEfficientSAMProvider(modelBundleURL: efficientSAMBundleURL)
 let sam3 = try CoreAISAM3Provider(modelBundleURL: sam3BundleURL)
 ```
 
@@ -45,7 +48,7 @@ A bundle URL is expected to contain:
 ```text
 ModelBundle/
 ├── metadata.json              # assets.main names the selected model asset
-├── tokenizer/
+├── tokenizer/                # required by CLIP and SAM3; omitted by EfficientSAM
 │   └── tokenizer.json
 └── selected-model.aimodel     # or .aimodelc
 ```
@@ -168,6 +171,14 @@ inventory, while `SubjectMaskSelector` implements ordered prompts, minimum
 quality/confidence, best-mask selection, and cache-only or generate-if-missing
 acquisition. `SegmentationBuildTransportCodec` provides a versioned JSON-lines
 event schema for helper processes.
+
+`CoreAIEfficientSAMProvider` adapts EfficientSAM's point-only runtime to the
+same `SubjectSegmenting` contract. It sends an empty `PointQuery`: a Q=1 model
+export uses its single center point, while a perfect-square multi-query export
+uses the runtime's regular point grid. The provider returns the highest-scoring
+mask and preserves the requested prompt in diagnostics, although EfficientSAM
+does not semantically interpret that text. For unattended subject discovery,
+prefer an export with `--num-queries 64 --num-pts 1`.
 
 ## Model export tools
 

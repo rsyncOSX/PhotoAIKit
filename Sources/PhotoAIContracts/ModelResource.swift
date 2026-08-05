@@ -40,6 +40,17 @@ public struct ModelResourceDescriptor: Hashable, Sendable {
         preprocessingVersion: "sam3-bounded-image-v1",
         configurationVersion: "coreai-sam3-mask-v1"
     )
+
+    public static let efficientSAM = ModelResourceDescriptor(
+        kind: "segmenter",
+        bundleDescriptor: ModelBundleDescriptor(
+            family: "efficient-sam",
+            fallbackName: "EfficientSAM",
+            requiredRelativePaths: []
+        ),
+        preprocessingVersion: "efficient-sam-bounded-image-v1",
+        configurationVersion: "coreai-efficient-sam-mask-v1"
+    )
 }
 
 public struct ModelResource: Equatable, Sendable {

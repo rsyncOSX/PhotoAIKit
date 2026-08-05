@@ -3,10 +3,9 @@ import CoreGraphics
 import Foundation
 import PhotoAIContracts
 
-// The package runtime does not yet declare these types Sendable. They never
-// leave CoreAISAM3Provider's actor isolation. Recheck this when updating the
-// pinned coreai-models revision and remove the conformances when upstream does.
-extension ImageSegmenter: @retroactive @unchecked Sendable {}
+// The package runtime does not yet declare this type Sendable. It never leaves
+// CoreAISAM3Provider's actor isolation. Recheck this when updating the pinned
+// coreai-models revision and remove the conformance when upstream does.
 extension CoreAISegmentationEngine: @retroactive @unchecked Sendable {}
 
 /// Actor-owned Core AI SAM3 runtime. The host supplies the model bundle URL.

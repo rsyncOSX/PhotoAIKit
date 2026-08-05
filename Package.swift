@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "PhotoAIContracts", targets: ["PhotoAIContracts"]),
         .library(name: "CoreAICLIPBackend", targets: ["CoreAICLIPBackend"]),
+        .library(name: "CoreAIEfficientSAMBackend", targets: ["CoreAIEfficientSAMBackend"]),
         .library(name: "CoreAISAM3Backend", targets: ["CoreAISAM3Backend"]),
         .library(name: "VisionFeaturePrintBackend", targets: ["VisionFeaturePrintBackend"]),
         .library(name: "PhotoAIWorkflows", targets: ["PhotoAIWorkflows"]),
@@ -25,6 +26,13 @@ let package = Package(
         .target(name: "PhotoAIContracts"),
         .target(
             name: "CoreAICLIPBackend",
+            dependencies: [
+                "PhotoAIContracts",
+                .product(name: "CoreAISegmentation", package: "coreai-models"),
+            ]
+        ),
+        .target(
+            name: "CoreAIEfficientSAMBackend",
             dependencies: [
                 "PhotoAIContracts",
                 .product(name: "CoreAISegmentation", package: "coreai-models"),
@@ -56,6 +64,7 @@ let package = Package(
                 "PhotoAIWorkflows",
                 "PhotoAIStorage",
                 "CoreAICLIPBackend",
+                "CoreAIEfficientSAMBackend",
                 "CoreAISAM3Backend",
                 "VisionFeaturePrintBackend",
                 .product(name: "CoreAISegmentation", package: "coreai-models"),
