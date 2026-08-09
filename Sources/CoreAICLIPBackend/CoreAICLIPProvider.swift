@@ -18,6 +18,8 @@ public actor CoreAICLIPProvider:
 
     public nonisolated static let resourceDescriptor = ModelResourceDescriptor.clip
     public nonisolated static let tokenizerVersion = "clip-bpe-tokenizer-v1"
+    public nonisolated static let pillowBicubicPreprocessingVersion =
+        "photoaikit-pillow-bicubic-v1"
 
     public nonisolated var semanticBackend: String {
         modelIdentity.family.lowercased() == "siglip2" ? "siglip2" : "clip"
@@ -34,10 +36,26 @@ public actor CoreAICLIPProvider:
             backend: semanticBackend,
             modelFingerprint: modelIdentity.artifactIdentifier,
             representation: "normalized-float-vector-json-v1",
-            preprocessingVersion: runtimeConfiguration.preprocessing.version,
+            preprocessingVersion: effectivePreprocessingVersion,
             normalizationVersion: runtimeConfiguration.normalizationVersion,
             configurationVersion: runtimeConfiguration.configurationVersion
         )
+    }
+
+    private nonisolated var effectivePreprocessingVersion: String {
+        Self.effectivePreprocessingVersion(
+            for: runtimeConfiguration.preprocessing
+        )
+    }
+
+    nonisolated static func effectivePreprocessingVersion(
+        for preprocessing: ModelImagePreprocessingMetadata
+    ) -> String {
+        guard preprocessing.resize == "shortest-side",
+              preprocessing.crop == "center",
+              preprocessing.interpolation == "bicubic"
+        else { return preprocessing.version }
+        return "\(preprocessing.version):\(Self.pillowBicubicPreprocessingVersion)"
     }
 
     private let modelBundleURL: URL
@@ -727,22 +745,25 @@ public actor CoreAICLIPProvider:
         let bytesPerPixel = 4
         let usesCenterCrop = preprocessing.resize == "shortest-side"
             && preprocessing.crop == "center"
+        if usesCenterCrop {
+            let rgba = try pillowBicubicCenterCrop(
+                image,
+                width: width,
+                height: height
+            )
+            return normalizedCHW(
+                rgba: rgba,
+                width: width,
+                height: height,
+                mean: preprocessing.mean,
+                standardDeviation: preprocessing.standardDeviation
+            )
+        }
+
         let sampledWidth: Int
         let sampledHeight: Int
-        if usesCenterCrop, image.width > image.height {
-            sampledHeight = height
-            sampledWidth = Int(
-                Double(height) * Double(image.width) / Double(image.height)
-            )
-        } else if usesCenterCrop {
-            sampledWidth = width
-            sampledHeight = Int(
-                Double(width) * Double(image.height) / Double(image.width)
-            )
-        } else {
-            sampledWidth = width
-            sampledHeight = height
-        }
+        sampledWidth = width
+        sampledHeight = height
         let bytesPerRow = sampledWidth * bytesPerPixel
         var rgba = [UInt8](
             repeating: 0,
@@ -760,11 +781,7 @@ public actor CoreAICLIPProvider:
               )
         else { throw CLIPProviderError.imagePreprocessingFailed }
 
-        if usesCenterCrop {
-            context.interpolationQuality = .high
-        } else {
-            context.interpolationQuality = .medium
-        }
+        context.interpolationQuality = .medium
         context.draw(
             image,
             in: CGRect(
@@ -775,24 +792,26 @@ public actor CoreAICLIPProvider:
             )
         )
 
+        return normalizedCHW(
+            rgba: rgba,
+            width: width,
+            height: height,
+            mean: preprocessing.mean,
+            standardDeviation: preprocessing.standardDeviation
+        )
+    }
+
+    private nonisolated static func normalizedCHW(
+        rgba: [UInt8],
+        width: Int,
+        height: Int,
+        mean: [Float],
+        standardDeviation: [Float]
+    ) -> [Float] {
         let count = width * height
-        let cropX = Int(
-            (Double(sampledWidth - width) / 2)
-                .rounded(.toNearestOrEven)
-        )
-        let cropY = Int(
-            (Double(sampledHeight - height) / 2)
-                .rounded(.toNearestOrEven)
-        )
         var chw = [Float](repeating: 0, count: 3 * count)
-        let mean = preprocessing.mean
-        let standardDeviation = preprocessing.standardDeviation
         for pixel in 0 ..< count {
-            let targetY = pixel / width
-            let targetX = pixel % width
-            let sampledPixel = (targetY + cropY) * sampledWidth
-                + targetX + cropX
-            let offset = sampledPixel * bytesPerPixel
+            let offset = pixel * 4
             let red = Float(rgba[offset]) / 255
             let green = Float(rgba[offset + 1]) / 255
             let blue = Float(rgba[offset + 2]) / 255
@@ -801,6 +820,174 @@ public actor CoreAICLIPProvider:
             chw[2 * count + pixel] = (blue - mean[2]) / standardDeviation[2]
         }
         return chw
+    }
+
+    /// Reproduces Pillow's `Image.resize(..., Resampling.BICUBIC)` followed by
+    /// the integer center crop used by Hugging Face's slow CLIP processor.
+    private nonisolated static func pillowBicubicCenterCrop(
+        _ image: CGImage,
+        width: Int,
+        height: Int
+    ) throws -> [UInt8] {
+        let sampledWidth: Int
+        let sampledHeight: Int
+        if image.width > image.height {
+            sampledHeight = height
+            sampledWidth = Int(
+                Double(height) * Double(image.width) / Double(image.height)
+            )
+        } else {
+            sampledWidth = width
+            sampledHeight = Int(
+                Double(width) * Double(image.height) / Double(image.width)
+            )
+        }
+
+        let cropX = centerCropOrigin(
+            sampledLength: sampledWidth,
+            targetLength: width
+        )
+        let cropY = centerCropOrigin(
+            sampledLength: sampledHeight,
+            targetLength: height
+        )
+        let source = try rgbaPixels(from: image)
+        let horizontalCoefficients = pillowBicubicCoefficients(
+            inputLength: image.width,
+            outputLength: sampledWidth,
+            outputRange: cropX ..< (cropX + width)
+        )
+        let verticalCoefficients = pillowBicubicCoefficients(
+            inputLength: image.height,
+            outputLength: sampledHeight,
+            outputRange: cropY ..< (cropY + height)
+        )
+
+        var horizontal = [UInt8](
+            repeating: 0,
+            count: image.height * width * 3
+        )
+        for sourceY in 0 ..< image.height {
+            for targetX in 0 ..< width {
+                let coefficients = horizontalCoefficients[targetX]
+                for channel in 0 ..< 3 {
+                    var value = Double.zero
+                    for (offset, weight) in coefficients.weights.enumerated() {
+                        let sourceX = coefficients.start + offset
+                        value += Double(
+                            source[(sourceY * image.width + sourceX) * 4 + channel]
+                        ) * weight
+                    }
+                    horizontal[(sourceY * width + targetX) * 3 + channel] = byte(
+                        from: value
+                    )
+                }
+            }
+        }
+
+        var output = [UInt8](repeating: 255, count: width * height * 4)
+        for targetY in 0 ..< height {
+            let coefficients = verticalCoefficients[targetY]
+            for targetX in 0 ..< width {
+                for channel in 0 ..< 3 {
+                    var value = Double.zero
+                    for (offset, weight) in coefficients.weights.enumerated() {
+                        let sourceY = coefficients.start + offset
+                        value += Double(
+                            horizontal[(sourceY * width + targetX) * 3 + channel]
+                        ) * weight
+                    }
+                    output[(targetY * width + targetX) * 4 + channel] = byte(
+                        from: value
+                    )
+                }
+            }
+        }
+        return output
+    }
+
+    private nonisolated static func rgbaPixels(
+        from image: CGImage
+    ) throws -> [UInt8] {
+        let bytesPerRow = image.width * 4
+        var rgba = [UInt8](
+            repeating: 0,
+            count: image.height * bytesPerRow
+        )
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: &rgba,
+                  width: image.width,
+                  height: image.height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: bytesPerRow,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              )
+        else { throw CLIPProviderError.imagePreprocessingFailed }
+        context.interpolationQuality = .none
+        context.draw(
+            image,
+            in: CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        )
+        return rgba
+    }
+
+    private struct PillowBicubicCoefficients: Sendable {
+        let start: Int
+        let weights: [Double]
+    }
+
+    private nonisolated static func pillowBicubicCoefficients(
+        inputLength: Int,
+        outputLength: Int,
+        outputRange: Range<Int>
+    ) -> [PillowBicubicCoefficients] {
+        let scale = Double(inputLength) / Double(outputLength)
+        let filterScale = max(scale, 1)
+        let support = 2 * filterScale
+        return outputRange.map { outputIndex in
+            let center = (Double(outputIndex) + 0.5) * scale
+            let start = max(0, Int(center - support + 0.5))
+            let end = min(inputLength, Int(center + support + 0.5))
+            var weights = (start ..< end).map { inputIndex in
+                pillowBicubicKernel(
+                    (Double(inputIndex) + 0.5 - center) / filterScale
+                )
+            }
+            let sum = weights.reduce(0, +)
+            if sum != 0 {
+                for index in weights.indices {
+                    weights[index] /= sum
+                }
+            }
+            return PillowBicubicCoefficients(start: start, weights: weights)
+        }
+    }
+
+    private nonisolated static func pillowBicubicKernel(_ value: Double) -> Double {
+        let x = abs(value)
+        if x < 1 {
+            return ((1.5 * x - 2.5) * x * x) + 1
+        }
+        if x < 2 {
+            return (((-0.5 * x + 2.5) * x - 4) * x) + 2
+        }
+        return 0
+    }
+
+    private nonisolated static func byte(from value: Double) -> UInt8 {
+        UInt8(clamping: Int(value.rounded()))
+    }
+
+    /// Matches Hugging Face's integer center-crop origin. When the excess is
+    /// odd, integer division deliberately selects the lower/left pixel rather
+    /// than rounding the half-pixel offset to the nearest even integer.
+    nonisolated static func centerCropOrigin(
+        sampledLength: Int,
+        targetLength: Int
+    ) -> Int {
+        max(0, (sampledLength - targetLength) / 2)
     }
 
     private nonisolated static func fillNDArray<T: BitwiseCopyable>(

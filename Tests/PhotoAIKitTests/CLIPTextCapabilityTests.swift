@@ -361,6 +361,84 @@ struct CLIPTextCapabilityTests {
         #expect(averageGreen > 0.8)
     }
 
+    @Test("CLIP center crop floors odd half-pixel offsets like Hugging Face")
+    func centerCropUsesHuggingFaceIntegerOrigin() {
+        #expect(CoreAICLIPProvider.centerCropOrigin(
+            sampledLength: 339,
+            targetLength: 224
+        ) == 57)
+        #expect(CoreAICLIPProvider.centerCropOrigin(
+            sampledLength: 331,
+            targetLength: 224
+        ) == 53)
+        #expect(CoreAICLIPProvider.centerCropOrigin(
+            sampledLength: 336,
+            targetLength: 224
+        ) == 56)
+    }
+
+    @Test("Corrected CLIP preprocessing invalidates older cached embeddings")
+    func correctedPreprocessingHasDistinctCacheVersion() {
+        let centerCrop = ModelImagePreprocessingMetadata(
+            version: "clip-preprocessing-v3",
+            width: 224,
+            height: 224,
+            resize: "shortest-side",
+            crop: "center",
+            interpolation: "bicubic",
+            mean: [0, 0, 0],
+            standardDeviation: [1, 1, 1]
+        )
+        let stretch = ModelImagePreprocessingMetadata(
+            version: "siglip-stretch-v1",
+            width: 256,
+            height: 256,
+            resize: "stretch",
+            crop: "none",
+            interpolation: "bilinear",
+            mean: [0.5, 0.5, 0.5],
+            standardDeviation: [0.5, 0.5, 0.5]
+        )
+
+        #expect(CoreAICLIPProvider.effectivePreprocessingVersion(
+            for: centerCrop
+        ) == "clip-preprocessing-v3:photoaikit-pillow-bicubic-v1")
+        #expect(CoreAICLIPProvider.effectivePreprocessingVersion(
+            for: stretch
+        ) == "siglip-stretch-v1")
+    }
+
+    @Test("CLIP bicubic resize matches Pillow reference pixels")
+    func bicubicResizeMatchesPillow() throws {
+        let image = try #require(patternedImage())
+        let preprocessing = ModelImagePreprocessingMetadata(
+            version: "test-pillow-bicubic",
+            width: 4,
+            height: 4,
+            resize: "shortest-side",
+            crop: "center",
+            interpolation: "bicubic",
+            mean: [0, 0, 0],
+            standardDeviation: [1, 1, 1]
+        )
+        let values = try CoreAICLIPProvider.preprocessCLIPImage(
+            image,
+            preprocessing: preprocessing
+        )
+        let expected: [(UInt8, UInt8, UInt8)] = [
+            (8, 9, 7), (50, 23, 33), (94, 39, 60), (138, 55, 87),
+            (17, 62, 35), (59, 76, 61), (103, 92, 88), (147, 108, 115),
+            (25, 116, 65), (67, 130, 91), (111, 146, 118), (155, 162, 145),
+            (34, 169, 93), (76, 183, 119), (120, 199, 146), (164, 215, 173),
+        ]
+        let count = 16
+        for (pixel, rgb) in expected.enumerated() {
+            #expect(UInt8(clamping: Int((values[pixel] * 255).rounded())) == rgb.0)
+            #expect(UInt8(clamping: Int((values[count + pixel] * 255).rounded())) == rgb.1)
+            #expect(UInt8(clamping: Int((values[(2 * count) + pixel] * 255).rounded())) == rgb.2)
+        }
+    }
+
     @Test("SigLIP 2 metadata selects fixed-resolution tokenizer runtime")
     func siglip2RuntimeConfiguration() throws {
         let preprocessing = ModelImagePreprocessingMetadata(
@@ -603,6 +681,37 @@ private func verticalBandImage() -> CGImage? {
         bitmapInfo: CGBitmapInfo(
             rawValue: CGImageAlphaInfo.last.rawValue
         ),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
+    )
+}
+
+private func patternedImage() -> CGImage? {
+    let width = 7
+    let height = 5
+    var pixels: [UInt8] = []
+    pixels.reserveCapacity(width * height * 4)
+    for y in 0 ..< height {
+        for x in 0 ..< width {
+            pixels.append(UInt8((x * 31 + y * 7) % 256))
+            pixels.append(UInt8((x * 11 + y * 43) % 256))
+            pixels.append(UInt8((x * 19 + y * 23) % 256))
+            pixels.append(255)
+        }
+    }
+    guard let provider = CGDataProvider(data: Data(pixels) as CFData) else {
+        return nil
+    }
+    return CGImage(
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
         provider: provider,
         decode: nil,
         shouldInterpolate: false,
