@@ -3,6 +3,7 @@ import CoreAIImageSegmenter
 import CoreGraphics
 import Foundation
 import PhotoAIContracts
+import Tokenizers
 
 /// Actor-owned Core AI CLIP runtime. The host supplies the model bundle URL.
 public actor CoreAICLIPProvider:
@@ -18,6 +19,10 @@ public actor CoreAICLIPProvider:
     public nonisolated static let resourceDescriptor = ModelResourceDescriptor.clip
     public nonisolated static let tokenizerVersion = "clip-bpe-tokenizer-v1"
 
+    public nonisolated var semanticBackend: String {
+        modelIdentity.family.lowercased() == "siglip2" ? "siglip2" : "clip"
+    }
+
     public nonisolated static var factory: ModelProviderFactory<CoreAICLIPProvider> {
         ModelProviderFactory(descriptor: resourceDescriptor) { url in
             try CoreAICLIPProvider(modelBundleURL: url)
@@ -26,7 +31,7 @@ public actor CoreAICLIPProvider:
 
     public nonisolated var backendDescriptor: SimilarityBackendDescriptor {
         SimilarityBackendDescriptor(
-            backend: "clip",
+            backend: semanticBackend,
             modelFingerprint: modelIdentity.artifactIdentifier,
             representation: "normalized-float-vector-json-v1",
             preprocessingVersion: runtimeConfiguration.preprocessing.version,
@@ -57,7 +62,7 @@ public actor CoreAICLIPProvider:
         let model = try await loadModel()
         let values = try await imageEmbedding(for: image, model: model)
         return ImageEmbedding(
-            backend: "clip",
+            backend: semanticBackend,
             modelIdentity: modelIdentity,
             values: values
         )
@@ -71,11 +76,10 @@ public actor CoreAICLIPProvider:
         let sequenceLength = model.inputIDsDescriptor.shape[1]
         let paddingTokenID = runtimeConfiguration.tokenizer.paddingTokenID
             ?? CLIPTokenizer.eotTokenId
-        let queryTokens = Self.applyingPaddingToken(
-            to: model.tokenizer.encode(
-                text,
-                contextLength: sequenceLength
-            ),
+        let terminalTokenID = model.tokenizer.eosTokenID
+        let queryTokens = model.tokenizer.encode(
+            text,
+            contextLength: sequenceLength,
             paddingTokenID: paddingTokenID
         )
         let batch = try Self.makeTextBatch(
@@ -83,7 +87,8 @@ public actor CoreAICLIPProvider:
             fillerTokens: model.dummyTokens[0],
             batchSize: model.inputIDsDescriptor.shape[0],
             sequenceLength: sequenceLength,
-            paddingTokenID: paddingTokenID
+            paddingTokenID: paddingTokenID,
+            terminalTokenID: terminalTokenID
         )
 
         try Task.checkCancellation()
@@ -352,9 +357,23 @@ public actor CoreAICLIPProvider:
             throw CLIPProviderError.invalidModel("metadata.json does not define assets.main.")
         }
         let modelURL = modelBundleURL.appendingPathComponent(assetName)
-        let tokenizer = try CLIPTokenizer(
-            folder: modelBundleURL.appendingPathComponent("tokenizer", isDirectory: true)
+        let tokenizerFolder = modelBundleURL.appendingPathComponent(
+            "tokenizer",
+            isDirectory: true
         )
+        let tokenizer: CoreAITextTokenizer
+        switch runtimeConfiguration.tokenizer.type {
+        case "clip-bpe":
+            tokenizer = .clip(try CLIPTokenizer(folder: tokenizerFolder))
+        case "huggingface-tokenizer-json":
+            tokenizer = .huggingFace(
+                try await AutoTokenizer.from(modelFolder: tokenizerFolder)
+            )
+        default:
+            throw CLIPProviderError.invalidModel(
+                "Unsupported tokenizer type: \(runtimeConfiguration.tokenizer.type)."
+            )
+        }
 
         let model = try await AIModel(
             contentsOf: modelURL,
@@ -466,8 +485,9 @@ public actor CoreAICLIPProvider:
 
         let textBatchSize = inputIDsDescriptor.shape[0]
         let sequenceLength = inputIDsDescriptor.shape[1]
-        let emptyTokens = Self.applyingPaddingToken(
-            to: tokenizer.encode("a photo", contextLength: sequenceLength),
+        let emptyTokens = tokenizer.encode(
+            "a photo",
+            contextLength: sequenceLength,
             paddingTokenID: runtimeConfiguration.tokenizer.paddingTokenID
                 ?? CLIPTokenizer.eotTokenId
         )
@@ -619,7 +639,8 @@ public actor CoreAICLIPProvider:
         fillerTokens: [Int32],
         batchSize: Int,
         sequenceLength: Int,
-        paddingTokenID: Int32 = CLIPTokenizer.eotTokenId
+        paddingTokenID: Int32 = CLIPTokenizer.eotTokenId,
+        terminalTokenID: Int32 = CLIPTokenizer.eotTokenId
     ) throws -> CLIPTextBatch {
         guard batchSize > 0, sequenceLength > 1 else {
             throw CLIPTextInferenceError.invalidTokenInputShape(
@@ -629,28 +650,36 @@ public actor CoreAICLIPProvider:
         let query = normalizedTokenRow(
             queryTokens,
             sequenceLength: sequenceLength,
-            paddingTokenID: paddingTokenID
+            paddingTokenID: paddingTokenID,
+            terminalTokenID: terminalTokenID
         )
         let filler = normalizedTokenRow(
             fillerTokens,
             sequenceLength: sequenceLength,
-            paddingTokenID: paddingTokenID
+            paddingTokenID: paddingTokenID,
+            terminalTokenID: terminalTokenID
         )
         let rows = [query] + Array(repeating: filler, count: batchSize - 1)
         return CLIPTextBatch(
             tokenIDs: rows,
-            attentionMask: attentionMasks(for: rows)
+            attentionMask: attentionMasks(
+                for: rows,
+                terminalTokenID: terminalTokenID
+            )
         )
     }
 
     private nonisolated static func normalizedTokenRow(
         _ tokens: [Int32],
         sequenceLength: Int,
-        paddingTokenID: Int32
+        paddingTokenID: Int32,
+        terminalTokenID: Int32
     ) -> [Int32] {
         if tokens.count >= sequenceLength {
             var result = Array(tokens.prefix(sequenceLength))
-            result[sequenceLength - 1] = CLIPTokenizer.eotTokenId
+            if !result.dropFirst().contains(terminalTokenID) {
+                result[sequenceLength - 1] = terminalTokenID
+            }
             return result
         }
         return tokens + Array(
@@ -678,9 +707,12 @@ public actor CoreAICLIPProvider:
         return result
     }
 
-    static func attentionMasks(for tokenRows: [[Int32]]) -> [[Int32]] {
+    static func attentionMasks(
+        for tokenRows: [[Int32]],
+        terminalTokenID: Int32 = CLIPTokenizer.eotTokenId
+    ) -> [[Int32]] {
         tokenRows.map { row in
-            let terminalIndex = row.dropFirst().firstIndex(of: CLIPTokenizer.eotTokenId)
+            let terminalIndex = row.dropFirst().firstIndex(of: terminalTokenID)
                 ?? (row.indices.last ?? 0)
             return row.indices.map { $0 <= terminalIndex ? 1 : 0 }
         }
@@ -852,6 +884,46 @@ public actor CoreAICLIPProvider:
         return result
     }
 
+    private enum CoreAITextTokenizer: Sendable {
+        case clip(CLIPTokenizer)
+        case huggingFace(any Tokenizer)
+
+        var eosTokenID: Int32 {
+            switch self {
+            case .clip:
+                CLIPTokenizer.eotTokenId
+            case let .huggingFace(tokenizer):
+                Int32(tokenizer.eosTokenId ?? 1)
+            }
+        }
+
+        func encode(
+            _ text: String,
+            contextLength: Int,
+            paddingTokenID: Int32
+        ) -> [Int32] {
+            switch self {
+            case let .clip(tokenizer):
+                return CoreAICLIPProvider.applyingPaddingToken(
+                    to: tokenizer.encode(text, contextLength: contextLength),
+                    paddingTokenID: paddingTokenID
+                )
+            case let .huggingFace(tokenizer):
+                var tokens = tokenizer.encode(text: text.lowercased()).map(Int32.init)
+                if tokens.count >= contextLength {
+                    tokens = Array(tokens.prefix(contextLength))
+                    tokens[contextLength - 1] = eosTokenID
+                    return tokens
+                }
+                tokens.append(contentsOf: repeatElement(
+                    paddingTokenID,
+                    count: contextLength - tokens.count
+                ))
+                return tokens
+            }
+        }
+    }
+
     private struct LoadedCLIPModel {
         let imageFunction: InferenceFunction
         let textFunction: InferenceFunction
@@ -863,7 +935,7 @@ public actor CoreAICLIPProvider:
         let imageDescriptor: NDArrayDescriptor
         let inputIDsDescriptor: NDArrayDescriptor
         let attentionMaskDescriptor: NDArrayDescriptor?
-        let tokenizer: CLIPTokenizer
+        let tokenizer: CoreAITextTokenizer
         let dummyTokens: [[Int32]]
         let imageFunctionRequiresTextInputs: Bool
         let textFunctionRequiresImageInput: Bool

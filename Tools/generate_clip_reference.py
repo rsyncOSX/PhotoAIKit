@@ -94,13 +94,55 @@ def openclip_embeddings(
     return image_values.float().tolist(), text_values.float().tolist()
 
 
+def siglip2_embeddings(
+    source_dir: Path,
+    image_paths: list[Path],
+    prompts: list[str],
+) -> tuple[list[list[float]], list[list[float]], list[list[int]]]:
+    model = transformers.AutoModel.from_pretrained(
+        source_dir,
+        local_files_only=True,
+        attn_implementation="eager",
+    ).eval()
+    processor = transformers.AutoProcessor.from_pretrained(
+        source_dir,
+        local_files_only=True,
+    )
+    images = [
+        ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        for path in image_paths
+    ]
+    image_inputs = processor(images=images, return_tensors="pt")["pixel_values"]
+    text_inputs = processor(
+        text=prompts,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=64,
+    )
+    attention_mask = text_inputs.get("attention_mask")
+    if attention_mask is None:
+        attention_mask = text_inputs["input_ids"].ne(0).to(torch.int64)
+    with torch.no_grad():
+        image_values = model.get_image_features(pixel_values=image_inputs)
+        text_values = model.get_text_features(
+            input_ids=text_inputs["input_ids"],
+            attention_mask=attention_mask,
+        )
+    return (
+        normalized(image_values),
+        normalized(text_values),
+        text_inputs["input_ids"].tolist(),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate reference embeddings for clipbench parity.",
     )
     parser.add_argument(
         "--model",
-        choices=["openai", "openclip-datacomp"],
+        choices=["openai", "openclip-datacomp", "siglip2"],
         default="openclip-datacomp",
     )
     parser.add_argument(
@@ -110,6 +152,11 @@ def main() -> None:
     parser.add_argument(
         "--pretrained",
         default="datacomp_s34b_b86k",
+    )
+    parser.add_argument(
+        "--source-dir",
+        type=Path,
+        help="Pinned local Hugging Face snapshot used with --model siglip2.",
     )
     parser.add_argument(
         "--image",
@@ -128,6 +175,7 @@ def main() -> None:
     arguments = parser.parse_args()
 
     image_paths = [path.resolve() for path in arguments.image]
+    token_ids = None
     if arguments.model == "openai":
         image_values, text_values = openai_embeddings(
             image_paths,
@@ -135,7 +183,7 @@ def main() -> None:
         )
         architecture = "ViT-B-32"
         pretrained = None
-    else:
+    elif arguments.model == "openclip-datacomp":
         image_values, text_values = openclip_embeddings(
             arguments.architecture,
             arguments.pretrained,
@@ -144,6 +192,16 @@ def main() -> None:
         )
         architecture = arguments.architecture
         pretrained = arguments.pretrained
+    else:
+        if arguments.source_dir is None:
+            parser.error("--source-dir is required with --model siglip2")
+        image_values, text_values, token_ids = siglip2_embeddings(
+            arguments.source_dir.resolve(),
+            image_paths,
+            arguments.text,
+        )
+        architecture = "SigLIP2-Base-Patch16-256"
+        pretrained = "webli-siglip2"
 
     reference = {
         "schema_version": 1,
@@ -170,12 +228,14 @@ def main() -> None:
             {
                 "text": text,
                 "embedding": embedding,
+                **({"token_ids": tokens} if token_ids is not None else {}),
             }
-            for text, embedding in zip(
+            for index, (text, embedding) in enumerate(zip(
                 arguments.text,
                 text_values,
                 strict=True,
-            )
+            ))
+            for tokens in ([token_ids[index]] if token_ids is not None else [[]])
         ],
     }
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

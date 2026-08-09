@@ -52,8 +52,9 @@ public struct CLIPRuntimeConfiguration: Equatable, Sendable {
                 "CLIP preprocessing metadata is missing or unsupported."
             )
         }
+        let supportedTokenizerTypes = ["clip-bpe", "huggingface-tokenizer-json"]
         guard tokenizer.contextLength > 1,
-              tokenizer.type == "clip-bpe",
+              supportedTokenizerTypes.contains(tokenizer.type),
               !tokenizer.version.isEmpty,
               (tokenizer.paddingTokenID ?? CLIPTokenizer.eotTokenId) >= 0
         else {

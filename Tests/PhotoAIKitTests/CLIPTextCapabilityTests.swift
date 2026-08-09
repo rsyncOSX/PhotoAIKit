@@ -361,6 +361,54 @@ struct CLIPTextCapabilityTests {
         #expect(averageGreen > 0.8)
     }
 
+    @Test("SigLIP 2 metadata selects fixed-resolution tokenizer runtime")
+    func siglip2RuntimeConfiguration() throws {
+        let preprocessing = ModelImagePreprocessingMetadata(
+            version: "siglip2-stretch-256-v1",
+            width: 256,
+            height: 256,
+            resize: "stretch",
+            crop: "none",
+            interpolation: "bilinear",
+            mean: [0.5, 0.5, 0.5],
+            standardDeviation: [0.5, 0.5, 0.5]
+        )
+        let metadata = ModelBundleMetadata(
+            name: "SigLIP 2 Base/16-256",
+            family: "siglip2",
+            sourceModel: "google/siglip2-base-patch16-256",
+            sourceRevision: "3f9f96cb90da5dbc758b01813f2f6f1aee24c1ab",
+            architecture: "SigLIP2-Base-Patch16-256",
+            pretrained: "webli-siglip2",
+            metadataVersion: "0.4",
+            embeddingDimensions: 768,
+            assets: ["main": "siglip2.aimodel"],
+            assetFingerprints: nil,
+            preprocessing: preprocessing,
+            tokenizer: ModelTokenizerMetadata(
+                version: "siglip2-tokenizer-v1",
+                type: "huggingface-tokenizer-json",
+                contextLength: 64,
+                paddingTokenID: 0
+            ),
+            functions: [
+                "image": "image_encoder",
+                "text": "text_encoder",
+            ],
+            normalizationVersion: "l2-v1",
+            configurationVersion: "coreai-siglip2-dual-encoder-v1"
+        )
+
+        let configuration = try CLIPRuntimeConfiguration(metadata: metadata)
+
+        #expect(configuration.architecture == "SigLIP2-Base-Patch16-256")
+        #expect(configuration.embeddingDimensions == 768)
+        #expect(configuration.preprocessing == preprocessing)
+        #expect(configuration.tokenizer.type == "huggingface-tokenizer-json")
+        #expect(configuration.tokenizer.contextLength == 64)
+        #expect(configuration.tokenizer.paddingTokenID == 0)
+    }
+
     @Test("CLIP preprocessing preserves top-to-bottom pixel orientation")
     func preprocessingOrientation() throws {
         let image = try #require(verticalBandImage())
@@ -427,6 +475,27 @@ struct CLIPTextCapabilityTests {
             to: original,
             paddingTokenID: CLIPTokenizer.eotTokenId
         ) == original)
+    }
+
+    @Test("SigLIP token batches preserve EOS and mask zero padding")
+    func siglipTokenBatch() throws {
+        let batch = try CoreAICLIPProvider.makeTextBatch(
+            queryTokens: [42, 43, 1, 0, 0],
+            fillerTokens: [44, 1, 0, 0, 0],
+            batchSize: 2,
+            sequenceLength: 5,
+            paddingTokenID: 0,
+            terminalTokenID: 1
+        )
+
+        #expect(batch.tokenIDs == [
+            [42, 43, 1, 0, 0],
+            [44, 1, 0, 0, 0],
+        ])
+        #expect(batch.attentionMask == [
+            [1, 1, 1, 0, 0],
+            [1, 1, 0, 0, 0],
+        ])
     }
 
     private func fixtureTokenizer() throws -> CLIPTokenizer {

@@ -42,7 +42,7 @@ This map records how the CLIP and SAM3 code reviewed in `RawCullSAM3/isolateai.m
 
 ## Non-runtime sources and assets
 
-- `Tools/export_clip.py`, `Tools/export_sam3.py`, and `Tools/select_sam3_asset.py` are package-neutral exporter/developer tools. They require explicit output/bundle paths and emit verified fingerprint metadata.
+- `Tools/export_clip.py`, `Tools/export_siglip2.py`, `Tools/export_sam3.py`, and `Tools/select_sam3_asset.py` are package-neutral exporter/developer tools. They require explicit output/bundle paths and emit verified fingerprint metadata.
 - `RawCullSAM3/Resources/Models/CLIP` and `RawCullSAM3/Resources/Models/SAM3` are not copied.
 - The package manifest declares no resource target and no model files.
 

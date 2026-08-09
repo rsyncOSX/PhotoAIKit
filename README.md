@@ -1,6 +1,6 @@
 # PhotoAIKit
 
-Reusable Core AI CLIP, EfficientSAM, and SAM3 code extracted from RawCullSAM3. The package owns model inference, typed contracts, reusable indexing/segmentation workflows, and optional storage. It does not contain RawCull view models, UI, RAW-file decoding, helper-process behavior, or culling policy.
+Reusable Core AI CLIP, fixed-resolution SigLIP 2, EfficientSAM, and SAM3 code extracted from RawCullSAM3. The package owns model inference, typed contracts, reusable indexing/segmentation workflows, and optional storage. It does not contain RawCull view models, UI, RAW-file decoding, helper-process behavior, or culling policy.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ The package pins the same `apple/coreai-models` revision used by the source appl
 ## Products
 
 - `PhotoAIContracts`: model identities and verified fingerprints, capability/factory contracts, source values, typed image and text similarity values, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
-- `CoreAICLIPBackend`: actor-owned CLIP image preprocessing, text tokenization, Core AI inference, and image/text comparison.
+- `CoreAICLIPBackend`: actor-owned CLIP and fixed-resolution SigLIP 2 image preprocessing, text tokenization, Core AI inference, and image/text comparison.
 - `CoreAIEfficientSAMBackend`: actor-owned EfficientSAM point/grid inference and highest-confidence subject-mask adaptation.
 - `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, and mask decoding.
 - `VisionFeaturePrintBackend`: actor-owned Vision feature-print generation, opaque artifact coding, and native distance calculation.
@@ -48,7 +48,7 @@ A bundle URL is expected to contain:
 ```text
 ModelBundle/
 ├── metadata.json              # assets.main names the selected model asset
-├── tokenizer/                # required by CLIP and SAM3; omitted by EfficientSAM
+├── tokenizer/                # required by CLIP, SigLIP 2, and SAM3; omitted by EfficientSAM
 │   └── tokenizer.json
 └── selected-model.aimodel     # or .aimodelc
 ```
@@ -67,6 +67,11 @@ resolution, resize/crop/interpolation, normalization, and named Core AI
 functions. The provider still accepts older PhotoAIKit bundles as the original
 224-pixel stretch baseline. New exports use the model-correct shortest-side
 resize followed by a center crop.
+
+SigLIP 2 bundles use the same metadata envelope with `family: siglip2`, a
+64-token Hugging Face tokenizer JSON, fixed 256×256 stretch preprocessing, and
+their own backend identity. This prevents SigLIP 2 artifacts from being mixed
+with CLIP artifacts even when both have 768 dimensions.
 
 ## Host integration
 
@@ -196,6 +201,16 @@ uv run Tools/export_clip.py \
   --output-dir /path/to/models \
   --bundle-name CLIP-OpenAI
 
+uvx --from huggingface-hub hf download \
+  google/siglip2-base-patch16-256 \
+  --revision 3f9f96cb90da5dbc758b01813f2f6f1aee24c1ab \
+  --local-dir /path/to/models/SigLIP2-Base-Patch16-256/source
+
+uv run Tools/export_siglip2.py \
+  --source-dir /path/to/models/SigLIP2-Base-Patch16-256/source \
+  --output-dir /path/to/models/SigLIP2-Base-Patch16-256 \
+  --overwrite
+
 uv run Tools/export_sam3.py --output-dir /path/to/models
 python3 Tools/select_sam3_asset.py sam3_float16.aimodel \
   --bundle-dir /path/to/models/SAM3
@@ -207,6 +222,12 @@ The CLIP exporter supports the existing OpenAI
 two named functions in one Core AI asset and verifies that OpenCLIP and the
 saved PhotoAIKit tokenizer produce identical token IDs. Export and selection
 write the fingerprint manifest consumed by `ModelBundleResolver`.
+
+The SigLIP 2 exporter pins Google's Apache-2.0
+`siglip2-base-patch16-256` checkpoint and emits normalized 768-dimensional
+`image_encoder` and `text_encoder` functions. The
+`generate_clip_reference.py --model siglip2` command creates PyTorch fixtures
+for the opt-in CoreAI parity test.
 
 ## Deliberate host responsibilities
 

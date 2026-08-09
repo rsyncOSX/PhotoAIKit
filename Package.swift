@@ -20,6 +20,10 @@ let package = Package(
         .package(
             url: "https://github.com/apple/coreai-models.git",
             revision: "bffc38fe48f50e4e962ac9772b64a5b55a605286"
+        ),
+        .package(
+            url: "https://github.com/huggingface/swift-transformers",
+            from: "1.3.3"
         )
     ],
     targets: [
@@ -29,6 +33,7 @@ let package = Package(
             dependencies: [
                 "PhotoAIContracts",
                 .product(name: "CoreAISegmentation", package: "coreai-models"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ]
         ),
         .target(
