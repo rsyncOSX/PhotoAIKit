@@ -98,7 +98,7 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         do {
             let assetName = ModelBundleResolver(descriptor: Self.resourceDescriptor.bundleDescriptor)
                 .identity(at: runtimeResourcesURL)?.assetName ?? modelIdentity.assetName
-            let tokenizer = try CLIPTokenizer(
+            let tokenizer = try CoreAIClipTokenizer(
                 folder: runtimeResourcesURL.appendingPathComponent("tokenizer", isDirectory: true)
             )
             let parameters = SegmentationParameters(maskThreshold: Self.maskThreshold, maxSegments: 5)
@@ -170,7 +170,7 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
 
     private struct LoadedSAM3Model {
         let engine: CoreAISegmentationEngine
-        let tokenizer: CLIPTokenizer
+        let tokenizer: CoreAIClipTokenizer
         let parameters: SegmentationParameters
     }
 

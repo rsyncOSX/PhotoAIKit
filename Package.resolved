@@ -1,12 +1,12 @@
 {
-  "originHash" : "353ba4e09bab52802e760aff2fc0907ccf25773bce688350d7eb12a4c6cc228a",
+  "originHash" : "5ba8deab4d199af7425458f06d92a5b62770c8cdb03ec2f932505c20b26c3e41",
   "pins" : [
     {
       "identity" : "coreai-models",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/coreai-models.git",
       "state" : {
-        "revision" : "bffc38fe48f50e4e962ac9772b64a5b55a605286"
+        "revision" : "cc812078731871574c9b2eb620aa40734c4b89ee"
       }
     },
     {
@@ -104,8 +104,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mlc-ai/xgrammar",
       "state" : {
-        "branch" : "main",
-        "revision" : "257f870d1b905060a5d3168f6f997bb3481f90c1"
+        "revision" : "4d145cc13d878c751ebeed36af1c013074be76bc",
+        "version" : "0.2.2"
       }
     },
     {
