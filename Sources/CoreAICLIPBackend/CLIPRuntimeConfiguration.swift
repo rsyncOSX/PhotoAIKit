@@ -56,7 +56,7 @@ public struct CLIPRuntimeConfiguration: Equatable, Sendable {
         guard tokenizer.contextLength > 1,
               supportedTokenizerTypes.contains(tokenizer.type),
               !tokenizer.version.isEmpty,
-              (tokenizer.paddingTokenID ?? CLIPTokenizer.eotTokenId) >= 0
+              (tokenizer.paddingTokenID ?? CoreAIClipTokenizer.eotTokenId) >= 0
         else {
             throw CLIPProviderError.invalidModel(
                 "CLIP tokenizer metadata is missing or unsupported."

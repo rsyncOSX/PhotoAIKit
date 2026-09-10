@@ -576,8 +576,8 @@ struct CLIPTextCapabilityTests {
         ])
     }
 
-    private func fixtureTokenizer() throws -> CLIPTokenizer {
-        try CLIPTokenizer(
+    private func fixtureTokenizer() throws -> CoreAIClipTokenizer {
+        try CoreAIClipTokenizer(
             vocab: [
                 "h": 10,
                 "i</w>": 11,

@@ -93,7 +93,7 @@ public actor CoreAICLIPProvider:
 
         let sequenceLength = model.inputIDsDescriptor.shape[1]
         let paddingTokenID = runtimeConfiguration.tokenizer.paddingTokenID
-            ?? CLIPTokenizer.eotTokenId
+            ??             CoreAIClipTokenizer.eotTokenId
         let terminalTokenID = model.tokenizer.eosTokenID
         let queryTokens = model.tokenizer.encode(
             text,
@@ -382,7 +382,7 @@ public actor CoreAICLIPProvider:
         let tokenizer: CoreAITextTokenizer
         switch runtimeConfiguration.tokenizer.type {
         case "clip-bpe":
-            tokenizer = .clip(try CLIPTokenizer(folder: tokenizerFolder))
+            tokenizer = .clip(try CoreAIClipTokenizer(folder: tokenizerFolder))
         case "huggingface-tokenizer-json":
             tokenizer = .huggingFace(
                 try await AutoTokenizer.from(modelFolder: tokenizerFolder)
@@ -507,7 +507,7 @@ public actor CoreAICLIPProvider:
             "a photo",
             contextLength: sequenceLength,
             paddingTokenID: runtimeConfiguration.tokenizer.paddingTokenID
-                ?? CLIPTokenizer.eotTokenId
+                ?? CoreAIClipTokenizer.eotTokenId
         )
         let dummyTokens = Array(
             repeating: emptyTokens,
@@ -625,7 +625,7 @@ public actor CoreAICLIPProvider:
             let row = index / sequenceLength
             let column = index % sequenceLength
             guard row < tokens.count, column < tokens[row].count else {
-                return CLIPTokenizer.eotTokenId
+                return CoreAIClipTokenizer.eotTokenId
             }
             return tokens[row][column]
         }
@@ -657,8 +657,8 @@ public actor CoreAICLIPProvider:
         fillerTokens: [Int32],
         batchSize: Int,
         sequenceLength: Int,
-        paddingTokenID: Int32 = CLIPTokenizer.eotTokenId,
-        terminalTokenID: Int32 = CLIPTokenizer.eotTokenId
+        paddingTokenID: Int32 = CoreAIClipTokenizer.eotTokenId,
+        terminalTokenID: Int32 = CoreAIClipTokenizer.eotTokenId
     ) throws -> CLIPTextBatch {
         guard batchSize > 0, sequenceLength > 1 else {
             throw CLIPTextInferenceError.invalidTokenInputShape(
@@ -711,9 +711,9 @@ public actor CoreAICLIPProvider:
         paddingTokenID: Int32
     ) -> [Int32] {
         guard tokens.count > 1,
-              paddingTokenID != CLIPTokenizer.eotTokenId,
+              paddingTokenID != CoreAIClipTokenizer.eotTokenId,
               let terminalIndex = tokens.dropFirst()
-                  .firstIndex(of: CLIPTokenizer.eotTokenId),
+                  .firstIndex(of: CoreAIClipTokenizer.eotTokenId),
               terminalIndex < tokens.index(before: tokens.endIndex)
         else {
             return tokens
@@ -727,7 +727,7 @@ public actor CoreAICLIPProvider:
 
     static func attentionMasks(
         for tokenRows: [[Int32]],
-        terminalTokenID: Int32 = CLIPTokenizer.eotTokenId
+        terminalTokenID: Int32 = CoreAIClipTokenizer.eotTokenId
     ) -> [[Int32]] {
         tokenRows.map { row in
             let terminalIndex = row.dropFirst().firstIndex(of: terminalTokenID)
@@ -1072,13 +1072,13 @@ public actor CoreAICLIPProvider:
     }
 
     private enum CoreAITextTokenizer: Sendable {
-        case clip(CLIPTokenizer)
+        case clip(CoreAIClipTokenizer)
         case huggingFace(any Tokenizer)
 
         var eosTokenID: Int32 {
             switch self {
             case .clip:
-                CLIPTokenizer.eotTokenId
+                CoreAIClipTokenizer.eotTokenId
             case let .huggingFace(tokenizer):
                 Int32(tokenizer.eosTokenId ?? 1)
             }
