@@ -59,9 +59,13 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         }
         guard !Task.isCancelled else { throw SubjectSegmentationError.cancelled }
 
+        let response = SegmentationPostprocessor.decode(
+            output: output,
+            inputSize: request.inputSize,
+            parameters: model.parameters
+        )
         let decoded = try Self.makeMaskImage(
-            from: output,
-            outputSize: request.inputSize,
+            from: response,
             threshold: model.parameters.maskThreshold
         )
         let timing = SubjectSegmentationTiming(
@@ -174,42 +178,46 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         let parameters: SegmentationParameters
     }
 
-    private nonisolated struct DecodedMask {
+    nonisolated struct DecodedMask {
         let mask: CGImage
         let score: Float
     }
 
-    private nonisolated static func makeMaskImage(
-        from output: SegmentationOutput,
-        outputSize: CGSize,
+    nonisolated static func makeMaskImage(
+        from response: SegmentationResponse,
         threshold: Float
     ) throws -> DecodedMask {
-        let shape = output.masksShape
-        guard shape.count >= 4 else { throw SubjectSegmentationError.noMask }
-        let batchIndex = 0
-        let queryCount = shape[1]
-        let sourceHeight = shape[2]
-        let sourceWidth = shape[3]
-        let pixelsPerQuery = sourceWidth * sourceHeight
-        let width = Int(outputSize.width.rounded())
-        let height = Int(outputSize.height.rounded())
-        guard queryCount > 0, sourceWidth > 0, sourceHeight > 0, width > 0, height > 0,
-              output.predictedMasks.count >= (batchIndex + 1) * queryCount * pixelsPerQuery
-        else { throw SubjectSegmentationError.decodeFailure }
+        let width: Int
+        let height: Int
+        let probabilities: [Float]
+        if let probabilityMap = response.probabilityMap {
+            width = probabilityMap.width
+            height = probabilityMap.height
+            probabilities = probabilityMap.probabilities
+        } else {
+            guard let bestSegment = response.segments.first else {
+                throw SubjectSegmentationError.noMask
+            }
+            width = bestSegment.maskWidth
+            height = bestSegment.maskHeight
+            guard response.segments.allSatisfy({
+                $0.maskWidth == width
+                    && $0.maskHeight == height
+                    && $0.mask.count == width * height
+            }) else {
+                throw SubjectSegmentationError.decodeFailure
+            }
+            probabilities = (0 ..< width * height).map { index in
+                response.segments.contains { $0.mask[index] } ? 1 : 0
+            }
+        }
+        guard width > 0, height > 0, probabilities.count == width * height else {
+            throw SubjectSegmentationError.decodeFailure
+        }
 
-        guard let bestQuery = bestQueryIndex(
-            output: output,
-            batchIndex: batchIndex,
-            queryCount: queryCount
-        ) else { throw SubjectSegmentationError.noMask }
-
-        let maskBase = (batchIndex * queryCount + bestQuery.index) * pixelsPerQuery
-        let lowResolutionMask = output.predictedMasks[maskBase ..< maskBase + pixelsPerQuery].map(sigmoid)
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        fillBilinearMaskPixels(
-            source: lowResolutionMask,
-            sourceWidth: sourceWidth,
-            sourceHeight: sourceHeight,
+        fillMaskPixels(
+            probabilities: probabilities,
             threshold: threshold,
             pixels: &pixels,
             width: width,
@@ -230,43 +238,17 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
                   intent: .defaultIntent
               )
         else { throw SubjectSegmentationError.decodeFailure }
-        return DecodedMask(mask: image, score: bestQuery.score)
+        let score = response.segments.first?.score ?? probabilities.max() ?? 0
+        return DecodedMask(mask: image, score: score)
     }
 
-    private nonisolated static func bestQueryIndex(
-        output: SegmentationOutput,
-        batchIndex: Int,
-        queryCount: Int
-    ) -> (index: Int, score: Float)? {
-        let useDirectScores = !output.predictedScores.isEmpty
-        guard useDirectScores || output.predictedLogits.count >= (batchIndex + 1) * queryCount else {
-            return nil
-        }
-        if useDirectScores, output.predictedScores.count < (batchIndex + 1) * queryCount { return nil }
-        let presenceScore = output.presenceLogits.count > batchIndex
-            ? sigmoid(output.presenceLogits[batchIndex]) : 1
-        var best: (index: Int, score: Float)?
-        for queryIndex in 0 ..< queryCount {
-            let index = batchIndex * queryCount + queryIndex
-            let score = useDirectScores
-                ? output.predictedScores[index]
-                : sigmoid(output.predictedLogits[index]) * presenceScore
-            if best == nil || score > best!.score { best = (queryIndex, score) }
-        }
-        return best
-    }
-
-    private nonisolated static func fillBilinearMaskPixels(
-        source: [Float],
-        sourceWidth: Int,
-        sourceHeight: Int,
+    private nonisolated static func fillMaskPixels(
+        probabilities: [Float],
         threshold: Float,
         pixels: inout [UInt8],
         width: Int,
         height: Int
     ) {
-        let scaleX = Float(sourceWidth) / Float(width)
-        let scaleY = Float(sourceHeight) / Float(height)
         let feather: Float = 0.055
         let edge0 = threshold - feather
         let edge1 = threshold + feather
@@ -274,20 +256,8 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         pixels.withUnsafeMutableBufferPointer { buffer in
             guard let baseAddress = buffer.baseAddress else { return }
             for y in 0 ..< height {
-                let sourceY = max(0, min(Float(sourceHeight - 1), (Float(y) + 0.5) * scaleY - 0.5))
-                let y0 = Int(sourceY.rounded(.down))
-                let y1 = min(y0 + 1, sourceHeight - 1)
-                let yWeight = sourceY - Float(y0)
                 for x in 0 ..< width {
-                    let sourceX = max(0, min(Float(sourceWidth - 1), (Float(x) + 0.5) * scaleX - 0.5))
-                    let x0 = Int(sourceX.rounded(.down))
-                    let x1 = min(x0 + 1, sourceWidth - 1)
-                    let xWeight = sourceX - Float(x0)
-                    let top = source[y0 * sourceWidth + x0] * (1 - xWeight)
-                        + source[y0 * sourceWidth + x1] * xWeight
-                    let bottom = source[y1 * sourceWidth + x0] * (1 - xWeight)
-                        + source[y1 * sourceWidth + x1] * xWeight
-                    let probability = top * (1 - yWeight) + bottom * yWeight
+                    let probability = probabilities[y * width + x]
                     let alpha = smoothMaskAlpha(probability, edge0: edge0, edge1: edge1)
                     guard alpha > 0 else { continue }
                     let offset = (y * width + x) * 4
@@ -309,8 +279,6 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         let smoothed = clamped * clamped * (3 - 2 * clamped)
         return UInt8(max(0, min(255, Int((smoothed * 255).rounded()))))
     }
-
-    private nonisolated static func sigmoid(_ value: Float) -> Float { 1 / (1 + exp(-value)) }
 }
 
 public enum SAM3ProviderError: Error, CustomStringConvertible, Sendable {

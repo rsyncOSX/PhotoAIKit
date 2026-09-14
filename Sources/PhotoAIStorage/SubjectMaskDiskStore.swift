@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 
 /// PNG + JSON SAM3 mask store. The host must inject the cache directory.
 public actor SubjectMaskDiskStore: SubjectMaskStoring, SubjectMaskCacheMetadataProviding {
-    private static let cacheKeyVersion = "v1-sam3mask"
+    private static let cacheKeyVersion = "v2-multi-subject-mask"
     private static let logger = Logger(subsystem: "PhotoAIKit", category: "SubjectMaskDiskStore")
 
     public nonisolated let cacheDirectory: URL

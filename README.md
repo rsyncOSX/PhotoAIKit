@@ -15,7 +15,7 @@ The package pins the same `apple/coreai-models` revision used by the source appl
 - `PhotoAIContracts`: model identities and verified fingerprints, capability/factory contracts, source values, typed image and text similarity values, segmentation/embedding types, provider/store/decoder protocols, and URL-based model-bundle validation.
 - `CoreAICLIPBackend`: actor-owned CLIP and fixed-resolution SigLIP 2 image preprocessing, text tokenization, Core AI inference, and image/text comparison.
 - `CoreAIEfficientSAMBackend`: actor-owned EfficientSAM point/grid inference and highest-confidence subject-mask adaptation.
-- `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, and mask decoding.
+- `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, exhaustive semantic-mask decoding, and multi-instance fallback.
 - `VisionFeaturePrintBackend`: actor-owned Vision feature-print generation, opaque artifact coding, and native distance calculation.
 - `PhotoAIWorkflows`: bounded vector/opaque artifact indexing, configurable fallback, cosine similarity, segmentation preprocessing/batching, versioned batch transport, mask cataloging, prompt fallback, best-mask selection, geometry, and quality classification.
 - `PhotoAIStorage`: injected memory/disk mask stores, current descriptor-complete artifact codecs, and legacy embedding readers.
@@ -111,6 +111,10 @@ let result = try await service.segment(
     prompt: .subject
 )
 ```
+
+SAM3 results expose one composited mask containing every subject that matches
+the selected prompt. The backend uses the model's exhaustive semantic
+probability map when available and otherwise unions all decoded instance masks.
 
 For CLIP indexing, inject the host decoder and choose fallback explicitly:
 
