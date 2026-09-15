@@ -51,6 +51,21 @@ public struct ModelResourceDescriptor: Hashable, Sendable {
         preprocessingVersion: "efficient-sam-bounded-image-v1",
         configurationVersion: "coreai-efficient-sam-mask-v1"
     )
+
+    /// Qwen causal language models exported as Core AI model bundles.
+    public static let qwen = ModelResourceDescriptor(
+        kind: "llm",
+        bundleDescriptor: ModelBundleDescriptor(
+            family: "qwen",
+            fallbackName: "Qwen",
+            requiredRelativePaths: [
+                "tokenizer/tokenizer.json",
+                "tokenizer/tokenizer_config.json",
+            ]
+        ),
+        preprocessingVersion: "qwen-chat-template-v1",
+        configurationVersion: "coreai-qwen-llm-v1"
+    )
 }
 
 public struct ModelResource: Equatable, Sendable {
