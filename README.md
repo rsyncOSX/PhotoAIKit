@@ -16,7 +16,7 @@ The package pins the same `apple/coreai-models` revision used by the source appl
 - `CoreAICLIPBackend`: actor-owned CLIP and fixed-resolution SigLIP 2 image preprocessing, text tokenization, Core AI inference, and image/text comparison.
 - `CoreAIEfficientSAMBackend`: actor-owned EfficientSAM point/grid inference and highest-confidence subject-mask adaptation.
 - `CoreAISAM3Backend`: actor-owned SAM3 tokenization, inference, exhaustive semantic-mask decoding, and multi-instance fallback.
-- `CoreAIQwenBackend`: validation and lazy loading of Qwen Core AI language models through Foundation Models sessions.
+- `CoreAIQwenBackend`: validation and loading of Qwen Core AI text and vision-language models through Foundation Models sessions.
 - `VisionFeaturePrintBackend`: actor-owned Vision feature-print generation, opaque artifact coding, and native distance calculation.
 - `PhotoAIWorkflows`: bounded vector/opaque artifact indexing, configurable fallback, cosine similarity, segmentation preprocessing/batching, versioned batch transport, mask cataloging, prompt fallback, best-mask selection, geometry, and quality classification.
 - `PhotoAIStorage`: injected memory/disk mask stores, current descriptor-complete artifact codecs, and legacy embedding readers.
@@ -36,9 +36,12 @@ let clip = try CoreAICLIPProvider(modelBundleURL: clipBundleURL)
 let efficientSAM = try CoreAIEfficientSAMProvider(modelBundleURL: efficientSAMBundleURL)
 let sam3 = try CoreAISAM3Provider(modelBundleURL: sam3BundleURL)
 let qwenProvider = try CoreAIQwenProvider(modelBundleURL: qwenBundleURL)
-let qwen = try await qwenProvider.makeLanguageModel()
+let qwen = try await qwenProvider.makeVisionLanguageModel()
 let session = LanguageModelSession(model: qwen)
-let response = try await session.respond(to: "Describe a strong photo composition.")
+let response = try await session.respond {
+    Attachment(photo)
+    "Describe this photo's composition."
+}
 print(response.content)
 ```
 
@@ -59,7 +62,9 @@ ModelBundle/
 ├── tokenizer/                # required by CLIP, SigLIP 2, SAM3, and Qwen; omitted by EfficientSAM
 │   ├── tokenizer.json
 │   └── tokenizer_config.json # additionally required by Qwen
-└── selected-model.aimodel     # or .aimodelc
+├── selected-model.aimodel     # assets.main; or .aimodelc
+├── embedding.aimodel          # Qwen VLM bundles only
+└── vision.aimodel             # Qwen VLM bundles only
 ```
 
 New exports also include `asset_fingerprints.main`. `ModelBundleResolver`
