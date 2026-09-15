@@ -21,6 +21,17 @@ struct QwenBackendTests {
         #expect(provider.configuration.hasEmbeddedTokenizer)
         #expect(provider.configuration.compression == "4bit_weights_8bit_kv_cache")
         #expect(provider.configuration.assetName == "qwen.aimodelc")
+        #expect(provider.configuration.modality == .text)
+    }
+
+    @Test("Qwen vision-language bundle metadata is accepted")
+    func acceptsQwenVisionBundle() throws {
+        let bundle = try makeBundle(kind: "vlm")
+        defer { try? FileManager.default.removeItem(at: bundle) }
+
+        let provider = try CoreAIQwenProvider(modelBundleURL: bundle)
+
+        #expect(provider.configuration.modality == .vision)
     }
 
     @Test("Non-Qwen language bundles are rejected")
@@ -47,7 +58,10 @@ struct QwenBackendTests {
         model.unload()
     }
 
-    private func makeBundle(tokenizer: String = "Qwen/Qwen3-4B") throws -> URL {
+    private func makeBundle(
+        tokenizer: String = "Qwen/Qwen3-4B",
+        kind: String = "llm"
+    ) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PhotoAIKitQwenTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -55,14 +69,28 @@ struct QwenBackendTests {
             withIntermediateDirectories: true
         )
         try Data().write(to: root.appendingPathComponent("qwen.aimodelc"))
+        if kind == "vlm" {
+            try Data().write(to: root.appendingPathComponent("embedding.aimodelc"))
+            try Data().write(to: root.appendingPathComponent("vision.aimodelc"))
+        }
         try Data("{}".utf8).write(to: root.appendingPathComponent("tokenizer/tokenizer.json"))
         try Data("{}".utf8).write(to: root.appendingPathComponent("tokenizer/tokenizer_config.json"))
         let metadata = """
             {
               "metadata_version": "0.2",
-              "kind": "llm",
+              "kind": "\(kind)",
               "name": "qwen3_4b_4bit_weights_8bit_kv_cache_dynamic",
-              "assets": { "main": "qwen.aimodelc" },
+              "assets": {
+                "main": "qwen.aimodelc",
+                "embedding": "embedding.aimodelc",
+                "vision": "vision.aimodelc"
+              },
+              "vision": {
+                "image_size": 448,
+                "patch_size": 14,
+                "image_token_count": 256,
+                "image_token_id": 151655
+              },
               "language": {
                 "tokenizer": "\(tokenizer)",
                 "vocab_size": 151936,

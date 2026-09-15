@@ -2,6 +2,12 @@ import CoreAILanguageModels
 import Foundation
 import PhotoAIContracts
 
+/// The inputs supported by a Qwen Core AI model bundle.
+public enum QwenModelModality: Equatable, Sendable {
+    case text
+    case vision
+}
+
 /// Metadata needed by a host to describe and budget a Qwen model.
 public struct QwenModelConfiguration: Equatable, Sendable {
     public let name: String
@@ -11,6 +17,7 @@ public struct QwenModelConfiguration: Equatable, Sendable {
     public let hasEmbeddedTokenizer: Bool
     public let compression: String?
     public let assetName: String
+    public let modality: QwenModelModality
 }
 
 /// Validates a Qwen Core AI bundle and creates Foundation Models-compatible runtimes.
@@ -47,7 +54,7 @@ public struct CoreAIQwenProvider: Sendable {
             throw QwenProviderError.invalidMetadata(Self.message(for: error))
         }
 
-        guard metadata.kind == "llm" else {
+        guard metadata.kind == "llm" || metadata.kind == "vlm" else {
             throw QwenProviderError.unsupportedModelKind(metadata.kind)
         }
         let identifiers = [metadata.language.tokenizer, metadata.source?.huggingFaceModelID]
@@ -62,6 +69,30 @@ public struct CoreAIQwenProvider: Sendable {
                 "language.vocab_size and language.max_context_length must be positive."
             )
         }
+        if metadata.kind == "vlm" {
+            guard metadata.vision != nil else {
+                throw QwenProviderError.invalidMetadata(
+                    "A Qwen vision-language bundle must define vision configuration."
+                )
+            }
+            for (role, asset) in [
+                ("embedding", metadata.assets.embedding),
+                ("vision", metadata.assets.vision),
+            ] {
+                guard let asset, !asset.isEmpty else {
+                    throw QwenProviderError.invalidMetadata(
+                        "A Qwen vision-language bundle must define assets.\(role)."
+                    )
+                }
+                guard FileManager.default.fileExists(
+                    atPath: modelBundleURL.appendingPathComponent(asset).path
+                ) else {
+                    throw QwenProviderError.invalidMetadata(
+                        "The Qwen vision-language asset is missing: \(asset)."
+                    )
+                }
+            }
+        }
 
         self.modelBundleURL = modelBundleURL
         self.modelIdentity = identity
@@ -72,7 +103,8 @@ public struct CoreAIQwenProvider: Sendable {
             maximumContextLength: metadata.language.maximumContextLength,
             hasEmbeddedTokenizer: metadata.language.hasEmbeddedTokenizer,
             compression: metadata.compression,
-            assetName: identity.assetName
+            assetName: identity.assetName,
+            modality: metadata.kind == "vlm" ? .vision : .text
         )
     }
 
@@ -96,6 +128,21 @@ public struct CoreAIQwenProvider: Sendable {
         }
     }
 
+    /// Creates a Foundation Models-compatible Qwen vision-language runtime.
+    ///
+    /// The bundle must use `kind=vlm` and provide `main`, `embedding`, and
+    /// `vision` Core AI assets. Attach a `CGImage` to the session prompt.
+    public func makeVisionLanguageModel() async throws -> CoreAIVisionLanguageModel {
+        guard configuration.modality == .vision else {
+            throw QwenProviderError.visionModelRequired
+        }
+        do {
+            return try await CoreAIVisionLanguageModel(resourcesAt: modelBundleURL)
+        } catch {
+            throw QwenProviderError.modelLoad(Self.message(for: error))
+        }
+    }
+
     private static func message(for error: Error) -> String {
         let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return description.isEmpty ? String(reflecting: error) : description
@@ -107,6 +154,7 @@ public enum QwenProviderError: Error, CustomStringConvertible, Sendable {
     case invalidMetadata(String)
     case unsupportedModelKind(String)
     case notQwenModel
+    case visionModelRequired
     case modelLoad(String)
 
     public var description: String {
@@ -119,6 +167,8 @@ public enum QwenProviderError: Error, CustomStringConvertible, Sendable {
             "Expected an llm bundle, got \(kind)."
         case .notQwenModel:
             "The bundle tokenizer and source model do not identify a Qwen model."
+        case .visionModelRequired:
+            "Image prompts require a Qwen vision-language bundle (kind=vlm)."
         case let .modelLoad(message):
             "Qwen model load failed: \(message)"
         }
@@ -142,6 +192,15 @@ private extension CoreAIQwenProvider {
         let language: Language
         let source: Source?
         let compression: String?
+        let assets: Assets
+        let vision: Vision?
+
+        struct Assets: Decodable {
+            let embedding: String?
+            let vision: String?
+        }
+
+        struct Vision: Decodable {}
 
         struct Language: Decodable {
             let tokenizer: String
