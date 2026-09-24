@@ -9,7 +9,7 @@ import PhotoAIContracts
 extension CoreAISegmentationEngine: @retroactive @unchecked Sendable {}
 
 /// Actor-owned Core AI SAM3 runtime. The host supplies the model bundle URL.
-public actor CoreAISAM3Provider: SubjectSegmenting {
+public actor CoreAISAM3Provider: SubjectSegmenting, ObjectInstanceSegmenting {
     public nonisolated let modelIdentity: ModelIdentity
 
     public nonisolated static let resourceDescriptor = ModelResourceDescriptor.sam3
@@ -23,9 +23,13 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
     private let modelBundleURL: URL
     private let runtimeResourcesURL: URL
     private var model: LoadedSAM3Model?
+    private let maximumSegmentCount: Int
     private nonisolated static let maskThreshold: Float = 0.5
 
-    public init(modelBundleURL: URL) throws {
+    public init(modelBundleURL: URL, maximumSegmentCount: Int = 8) throws {
+        guard (1...16).contains(maximumSegmentCount) else {
+            throw ObjectSegmentationError.invalidInstanceLimit
+        }
         let runtimeResourcesURL = try Self.resourcesURLForImageSegmenter(modelBundleURL)
         let resolver = ModelBundleResolver(descriptor: Self.resourceDescriptor.bundleDescriptor)
         guard case let .valid(_, identity) = resolver.status(at: runtimeResourcesURL) else {
@@ -34,39 +38,24 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         self.modelBundleURL = modelBundleURL
         self.runtimeResourcesURL = runtimeResourcesURL
         self.modelIdentity = identity
+        self.maximumSegmentCount = maximumSegmentCount
     }
 
     public func segment(_ request: SubjectSegmentationRequest) async throws -> SubjectSegmentationResult {
         let totalStart = CFAbsoluteTimeGetCurrent()
         guard !Task.isCancelled else { throw SubjectSegmentationError.cancelled }
-        let model = try await loadModel()
-
-        let output: SegmentationOutput
+        let response: SegmentationResponse
         do {
-            let tokens = model.tokenizer.encode(
-                request.prompt.query,
-                contextLength: model.parameters.tokenizerContextLength
-            )
-            output = try await model.engine.segment(
-                image: request.image,
-                textQuery: .tokens([tokens]),
-                parameters: model.parameters
-            )
+            response = try await infer(image: request.image, query: request.prompt.query,
+                                       inputSize: request.inputSize, limit: maximumSegmentCount)
         } catch is CancellationError {
             throw SubjectSegmentationError.cancelled
         } catch {
             throw SubjectSegmentationError.providerFailure(Self.message(for: error))
         }
-        guard !Task.isCancelled else { throw SubjectSegmentationError.cancelled }
-
-        let response = SegmentationPostprocessor.decode(
-            output: output,
-            inputSize: request.inputSize,
-            parameters: model.parameters
-        )
         let decoded = try Self.makeMaskImage(
             from: response,
-            threshold: model.parameters.maskThreshold
+            threshold: Self.maskThreshold
         )
         let timing = SubjectSegmentationTiming(
             totalMilliseconds: (CFAbsoluteTimeGetCurrent() - totalStart) * 1_000
@@ -96,6 +85,61 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
         )
     }
 
+    public func segmentInstances(_ request: ObjectSegmentationRequest) async throws -> ObjectSegmentationResult {
+        guard request.maximumInstanceCount > 0 else { throw ObjectSegmentationError.invalidInstanceLimit }
+        guard request.inputSize.width.isFinite, request.inputSize.height.isFinite,
+              request.outputSize.width.isFinite, request.outputSize.height.isFinite,
+              request.inputSize.width > 0, request.inputSize.height > 0,
+              request.outputSize.width > 0, request.outputSize.height > 0,
+              request.outputSize.width <= 32_768, request.outputSize.height <= 32_768 else {
+            throw ObjectSegmentationError.invalidImageSize
+        }
+        let start = CFAbsoluteTimeGetCurrent()
+        let limit = min(request.maximumInstanceCount, maximumSegmentCount)
+        let response = try await infer(image: request.image, query: request.concept.query,
+                                       inputSize: request.inputSize, limit: limit)
+        let candidates = try Self.decodeInstances(response.segments, inputSize: request.inputSize,
+                                                  outputSize: request.outputSize, limit: limit)
+        return ObjectSegmentationResult(
+            sourceID: request.sourceID, requestID: request.requestID,
+            concept: request.concept, instances: candidates, modelIdentity: modelIdentity,
+            inputSize: request.inputSize, outputSize: request.outputSize,
+            timing: SubjectSegmentationTiming(totalMilliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1_000)
+        )
+    }
+
+    private func infer(image: CGImage, query: String, inputSize: CGSize,
+                       limit: Int) async throws -> SegmentationResponse {
+        try Task.checkCancellation()
+        let model = try await loadModel()
+        try Task.checkCancellation()
+        var parameters = model.parameters
+        parameters.maxSegments = limit
+        let tokens = model.tokenizer.encode(query, contextLength: parameters.tokenizerContextLength)
+        let output = try await model.engine.segment(
+            image: image, textQuery: .tokens([tokens]), parameters: parameters
+        )
+        try Task.checkCancellation()
+        return SegmentationPostprocessor.decode(output: output, inputSize: inputSize,
+                                                 parameters: parameters)
+    }
+
+    // Phase 0 diagnostic only. Kept internal so the production segmentation
+    // contract continues to expose the exhaustive union mask.
+    func diagnoseInstances(
+        image: CGImage,
+        concept: String,
+        maximumSegmentCount: Int
+    ) async throws -> (response: SegmentationResponse, milliseconds: Double) {
+        precondition(maximumSegmentCount > 0)
+        try Task.checkCancellation()
+        let start = CFAbsoluteTimeGetCurrent()
+        let response = try await infer(image: image, query: concept,
+                                       inputSize: CGSize(width: image.width, height: image.height),
+                                       limit: maximumSegmentCount)
+        return (response, (CFAbsoluteTimeGetCurrent() - start) * 1_000)
+    }
+
     private func loadModel() async throws -> LoadedSAM3Model {
         if let model { return model }
 
@@ -105,7 +149,8 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
             let tokenizer = try CoreAIClipTokenizer(
                 folder: runtimeResourcesURL.appendingPathComponent("tokenizer", isDirectory: true)
             )
-            let parameters = SegmentationParameters(maskThreshold: Self.maskThreshold, maxSegments: 5)
+            let parameters = SegmentationParameters(maskThreshold: Self.maskThreshold,
+                                                    maxSegments: maximumSegmentCount)
             let engine = try await CoreAISegmentationEngine(
                 parameters: parameters,
                 modelURL: runtimeResourcesURL.appendingPathComponent(assetName)
@@ -181,6 +226,99 @@ public actor CoreAISAM3Provider: SubjectSegmenting {
     nonisolated struct DecodedMask {
         let mask: CGImage
         let score: Float
+    }
+
+    /// Sort by descending score, then normalized box geometry, then original runtime order.
+    /// IDs are ranks in this sorted result and remain stable when the result is cached.
+    nonisolated static func decodeInstances(
+        _ segments: [Segment], inputSize: CGSize, outputSize: CGSize, limit: Int
+    ) throws -> [ObjectMaskInstance] {
+        struct Candidate {
+            let runtimeIndex: Int
+            let mask: CGImage
+            let score: Float
+            let box: CGRect
+        }
+        var candidates: [Candidate] = []
+        for (runtimeIndex, segment) in segments.enumerated() {
+            try Task.checkCancellation()
+            guard segment.maskWidth > 0, segment.maskHeight > 0,
+                  segment.maskWidth <= Int.max / segment.maskHeight,
+                  segment.mask.count == segment.maskWidth * segment.maskHeight else {
+                throw ObjectSegmentationError.decodeFailure
+            }
+            guard let bounds = try measuredBounds(segment) else { continue }
+            let box = validBox(segment.box, inputSize: inputSize) ? segment.box : bounds
+            let normalized = CGRect(
+                x: box.minX / inputSize.width, y: box.minY / inputSize.height,
+                width: box.width / inputSize.width, height: box.height / inputSize.height
+            )
+            let targetWidth = Int(outputSize.width.rounded())
+            let targetHeight = Int(outputSize.height.rounded())
+            guard targetWidth > 0, targetHeight > 0,
+                  let mask = imageForSegment(segment, width: targetWidth, height: targetHeight)
+            else { throw ObjectSegmentationError.decodeFailure }
+            try Task.checkCancellation()
+            candidates.append(Candidate(runtimeIndex: runtimeIndex, mask: mask,
+                                        score: segment.score, box: normalized))
+        }
+        candidates.sort { a, b in
+            let aScore = a.score.isFinite ? a.score : -.infinity
+            let bScore = b.score.isFinite ? b.score : -.infinity
+            if aScore != bScore { return aScore > bScore }
+            let ac = [a.box.minX, a.box.minY, a.box.width, a.box.height]
+            let bc = [b.box.minX, b.box.minY, b.box.width, b.box.height]
+            for (x, y) in zip(ac, bc) where x != y { return x < y }
+            return a.runtimeIndex < b.runtimeIndex
+        }
+        return candidates.prefix(limit).enumerated().map { index, candidate in
+            ObjectMaskInstance(index: index, mask: candidate.mask, score: candidate.score,
+                               normalizedBoundingBox: candidate.box)
+        }
+    }
+
+    private nonisolated static func validBox(_ box: CGRect, inputSize: CGSize) -> Bool {
+        box.minX.isFinite && box.minY.isFinite && box.maxX.isFinite && box.maxY.isFinite
+            && box.width > 0 && box.height > 0
+            && box.minX >= 0 && box.minY >= 0
+            && box.maxX <= inputSize.width && box.maxY <= inputSize.height
+    }
+
+    private nonisolated static func measuredBounds(_ segment: Segment) throws -> CGRect? {
+        var minX = segment.maskWidth, minY = segment.maskHeight
+        var maxX = -1, maxY = -1
+        for y in 0..<segment.maskHeight {
+            if y.isMultiple(of: 64) { try Task.checkCancellation() }
+            for x in 0..<segment.maskWidth where segment.mask[y * segment.maskWidth + x] {
+                minX = min(minX, x); minY = min(minY, y)
+                maxX = max(maxX, x); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        // Core AI's row-major mask starts at the image top; macOS boxes start at the bottom.
+        return CGRect(x: minX, y: segment.maskHeight - maxY - 1,
+                      width: maxX - minX + 1, height: maxY - minY + 1)
+    }
+
+    private nonisolated static func imageForSegment(_ segment: Segment,
+                                                     width: Int, height: Int) -> CGImage? {
+        let pixels = Data(segment.mask.map { $0 ? UInt8(255) : UInt8(0) })
+        guard let provider = CGDataProvider(data: pixels as CFData),
+              let image = CGImage(width: segment.maskWidth, height: segment.maskHeight,
+                                  bitsPerComponent: 8, bitsPerPixel: 8,
+                                  bytesPerRow: segment.maskWidth,
+                                  space: CGColorSpaceCreateDeviceGray(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false,
+                                  intent: .defaultIntent) else { return nil }
+        guard image.width != width || image.height != height else { return image }
+        guard let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        context.interpolationQuality = .none
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
     }
 
     nonisolated static func makeMaskImage(
