@@ -20,7 +20,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/apple/coreai-models.git",
-            revision: "1953c4f90ba0214c1abc7bebcb9be5107e329a46"
+            exact: "1.0.0"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers",
