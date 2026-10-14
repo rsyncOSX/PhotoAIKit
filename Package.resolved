@@ -1,12 +1,13 @@
 {
-  "originHash" : "c86742c7e67daddeac148d2ec5ca64fafc053fff0f1967cdaf4998434e0ce0da",
+  "originHash" : "944a0074d311411093cb5c2a32cb2b3d25baa6fcd4d3a2f7eb393efcadd6d7b5",
   "pins" : [
     {
       "identity" : "coreai-models",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/coreai-models.git",
       "state" : {
-        "revision" : "1953c4f90ba0214c1abc7bebcb9be5107e329a46"
+        "revision" : "5de95c6cd29e5e390fb36d87e13b2396668f7974",
+        "version" : "1.0.0"
       }
     },
     {

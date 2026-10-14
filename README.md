@@ -8,7 +8,7 @@ Reusable Core AI CLIP, fixed-resolution SigLIP 2, EfficientSAM, SAM3, and Qwen c
 - macOS 27 or newer
 - Swift 6 language mode
 
-The package pins the same `apple/coreai-models` revision used by the source application. It does not embed any `.aimodel`, `.aimodelc`, tokenizer, or model metadata resources.
+The package pins `apple/coreai-models` to the exact stable version `1.0.0`. It does not embed any `.aimodel`, `.aimodelc`, tokenizer, or model metadata resources.
 
 ## Products
 
