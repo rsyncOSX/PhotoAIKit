@@ -11,9 +11,18 @@ public actor VisionFeaturePrintBackend:
 {
     public nonisolated let revision: Int
     public nonisolated let backendDescriptor: SimilarityBackendDescriptor
+    private nonisolated let serializer: any VisionWorkSerializing
 
-    public init(revision: Int = VNGenerateImageFeaturePrintRequestRevision2) {
+    /// - Parameter serializer: runs the Vision request. Pass the host's
+    ///   process-wide serializer so feature prints never run at the same time
+    ///   as Vision requests made elsewhere. The default is shared by every
+    ///   backend that is not given one.
+    public init(
+        revision: Int = VNGenerateImageFeaturePrintRequestRevision2,
+        serializer: any VisionWorkSerializing = SerialVisionWorkQueue.shared
+    ) {
         self.revision = revision
+        self.serializer = serializer
         self.backendDescriptor = SimilarityBackendDescriptor(
             backend: "vision-feature-print",
             modelFingerprint: "apple-vision-feature-print:revision-\(revision)",
@@ -29,27 +38,29 @@ public actor VisionFeaturePrintBackend:
         source: AIImageSource
     ) async throws -> SimilarityArtifact {
         try Task.checkCancellation()
-        let request = VNGenerateImageFeaturePrintRequest()
-        request.revision = revision
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        do {
-            try handler.perform([request])
-        } catch {
-            throw VisionFeaturePrintError.generationFailed(String(describing: error))
+        let revision = revision
+        let payload = try await serializer.run {
+            let request = VNGenerateImageFeaturePrintRequest()
+            request.revision = revision
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                throw VisionFeaturePrintError.generationFailed(String(describing: error))
+            }
+            guard let observation = request.results?.first as? VNFeaturePrintObservation else {
+                throw VisionFeaturePrintError.missingObservation
+            }
+            do {
+                return try NSKeyedArchiver.archivedData(
+                    withRootObject: observation,
+                    requiringSecureCoding: true
+                )
+            } catch {
+                throw VisionFeaturePrintError.encodingFailed(String(describing: error))
+            }
         }
         try Task.checkCancellation()
-        guard let observation = request.results?.first as? VNFeaturePrintObservation else {
-            throw VisionFeaturePrintError.missingObservation
-        }
-        let payload: Data
-        do {
-            payload = try NSKeyedArchiver.archivedData(
-                withRootObject: observation,
-                requiringSecureCoding: true
-            )
-        } catch {
-            throw VisionFeaturePrintError.encodingFailed(String(describing: error))
-        }
         return SimilarityArtifact(
             descriptor: SimilarityArtifactDescriptor(
                 backend: backendDescriptor,

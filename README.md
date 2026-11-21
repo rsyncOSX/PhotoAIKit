@@ -165,6 +165,37 @@ representation, preprocessing, normalization, configuration, source fingerprint,
 and schema version. Vision observations stay opaque; comparison goes through
 `VisionFeaturePrintBackend.distance(from:to:)`.
 
+### Running Vision work one at a time
+
+`VNImageRequestHandler.perform(_:)` blocks its thread, and Vision needs a free
+thread from Swift concurrency's cooperative pool to finish. With too many
+requests at once, every pool thread can end up blocked and the process stops
+making progress.
+
+`VisionFeaturePrintBackend` therefore runs its Vision request through a
+`VisionWorkSerializing`. By default every backend shares
+`SerialVisionWorkQueue.shared`, so feature prints run one at a time, waiting
+callers suspend instead of holding a pool thread, and the Vision work runs
+outside the pool.
+
+A host that also makes Vision requests elsewhere should pass one process-wide
+serializer to every backend, so all of its Vision work shares one queue:
+
+```swift
+struct HostVisionSerializer: VisionWorkSerializing {
+    func run<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await hostVisionGate.run(body)
+    }
+}
+
+let vision = VisionFeaturePrintBackend(serializer: HostVisionSerializer())
+```
+
+An implementation must skip `body` and throw `CancellationError` when the
+caller is cancelled before its turn, and must let a started `body` run to the
+end. Never call `run` from inside a body: the inner call waits for the outer
+one, which never finishes.
+
 `EmbeddingCodec.encode(EmbeddingArtifact)` is the current CLIP persistence API.
 The former identity-incomplete writers remain callable but are deprecated.
 `decodeMigrating` accepts both version-1 formats against the real current model
